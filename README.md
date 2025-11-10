@@ -1,2 +1,2 @@
-# lightning-grasp
-internal release.
+# Lightning Grasp
+The public repository of the Lightning Grasp system. 
