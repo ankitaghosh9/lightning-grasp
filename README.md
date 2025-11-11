@@ -24,7 +24,7 @@ Available environments:
 #### Option 2. Lightweight PIP Installation (Minimal)
 Not sure if you are tired of setting up a new heavy-weight environment for every new thing. 
 
-If you prefer a minimal setup and already have Python 3.8/3.9 installed:
+If you prefer a minimal setup and already have Python 3.8/3.9 and pytorch installed:
 ```
 pip install open3d==0.19.0 urdfpy==0.0.22 trimesh==4.9.0
 pip install networkx==3.2.1
