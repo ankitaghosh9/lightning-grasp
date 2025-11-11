@@ -1,7 +1,9 @@
 # Lightning Grasp
+[![CC BY-NC 4.0 License](https://licensebuttons.net/l/by-nc/4.0/88x31.png)](https://creativecommons.org/licenses/by-nc/4.0/)
+
 Public repository for the Lightning Grasp system. 
 
-**Thousands of grasps in seconds.**
+**Thousands of dexterous grasps in seconds.**
 ![](misc/teaser.png)
 ## Install
 Follow these steps to set up the environment and dependencies.
