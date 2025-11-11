@@ -281,7 +281,7 @@ def main(args):
 
     while True:
         idx = random.randint(0, n_result - 1)
-        robot_mesh = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=False)
+        robot_mesh = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=True)
 
         object_mesh = object.mesh.copy()
         object_mesh.apply_transform(result['object_pose'][idx].cpu().numpy())
