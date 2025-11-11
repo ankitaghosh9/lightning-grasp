@@ -80,7 +80,7 @@ The system includes several tunable parameters to optimize performance for your 
   - Some typical setups: (128, 256), (192, 256), (256, 256), (256, 512).
 
 ## Setup Your Model
-There are several examples in ``lygrasp/robot/`` folder. You can refer to ``lygrasp/robot/allegro.py`` for an tutorial. Basically, you simply need to setup a config object that specifies the contact field rules (i.e. which patches to use defined by allowed normals), canonical object space (i.e. where to initialize the object), and some URDF metadata. That's it!
+There are several examples in ``lygra/robot/`` folder. You can refer to ``lygra/robot/allegro.py`` for an tutorial. Basically, you simply need to setup a config object that specifies the contact field rules (i.e. which patches to use defined by allowed normals), canonical object space (i.e. where to initialize the object), and some URDF metadata. That's it!
 
 ## Notes
 **Known Limitations**
