@@ -1,4 +1,4 @@
-name: lygra
+name: affgen
 channels:
   - nvidia
   - conda-forge
@@ -139,7 +139,7 @@ dependencies:
       - narwhals==2.10.0
       - nbformat==5.10.4
       - nest-asyncio==1.6.0
-      - networkx==3.2.1
+      - networkx
       - numpy==2.0.2
       - nvidia-cublas-cu12==12.8.4.1
       - nvidia-cuda-cupti-cu12==12.8.90

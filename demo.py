@@ -36,6 +36,78 @@ import time
 import random
 import sys
 
+import open3d as o3d
+import numpy as np
+import torch
+
+def visualize_with_open3d(pos, normal, mask=None):
+    """
+    Args:
+        pos: [N, 3] tensor or array
+        normal: [N, 3] tensor or array
+        mask: Optional [N,] boolean mask for "support points"
+    """
+    # Convert to numpy
+    if isinstance(pos, torch.Tensor): pos = pos.cpu().numpy()
+    if isinstance(normal, torch.Tensor): normal = normal.cpu().numpy()
+
+    # Create Open3D point cloud object
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pos)
+    pcd.normals = o3d.utility.Vector3dVector(normal)
+
+    # Colorize
+    if mask is not None:
+        if isinstance(mask, torch.Tensor): mask = mask.cpu().numpy()
+        # Initialize colors as Gray
+        colors = np.full((pos.shape[0], 3), [0.5, 0.5, 0.5]) 
+        # Support points = Green, Others = Red
+        colors[mask] = [0, 1, 0]
+        colors[~mask] = [1, 0, 0]
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+    else:
+        # Default color based on normal direction (RGB = XYZ)
+        pcd.orient_normals_consistent_tangent_plane(10)
+        pcd.paint_uniform_color([0.1, 0.7, 1.0]) # Light Blue
+
+    # Create visualizer
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="Lightning Grasp - Point Cloud Debug")
+    vis.add_geometry(pcd)
+    
+    # Render normals as lines
+    opt = vis.get_render_option()
+    opt.point_show_normal = True # Press 'N' to toggle this in the window
+    
+    vis.run()
+    vis.destroy_window()
+
+import numpy as np
+
+def get_translation_statistics(poses):
+    """
+    Args:
+        poses: np.ndarray of shape (N, 4, 4)
+    """
+    # 1. Extract Translation Vectors
+    # Slicing: [All items, First 3 rows, 4th column]
+    # Result shape: (N, 3) where each row is [x, y, z]
+    translations = poses[:, :3, 3]
+    
+    # 2. Calculate Statistics along axis 0 (across the N samples)
+    stats = {
+        "mean": np.mean(translations, axis=0),
+        "std":  np.std(translations, axis=0),
+        "min":  np.min(translations, axis=0),
+        "max":  np.max(translations, axis=0),
+    }
+    
+    # 3. (Optional) Euclidean Distance from Origin (Norm)
+    # Useful to see the average "radius" or distance
+    norms = np.linalg.norm(translations, axis=1)
+    stats["mean_norm"] = np.mean(norms)
+    
+    return stats
 
 def get_args():
     parser = argparse.ArgumentParser(description="Script configuration")
@@ -119,6 +191,7 @@ def main(args):
     self_collision_link_pairs = torch.from_numpy(self_collision_link_pairs).cuda().int()
 
     contact_field = robot.get_contact_field()
+    # print("Contact Field", contact_field)
     dependency_sets = tree.get_dependency_sets([robot.get_base_link()])
 
     contact_parent_links = contact_field.get_all_parent_link_names()
@@ -128,21 +201,64 @@ def main(args):
     dependency_matrix = get_link_dependency_matrix(contact_field, dependency_sets)
     dependency_matrix = dependency_matrix.cuda()
 
+#################### PRINTING RESULTS ###########################
+    # print("mesh data", mesh_data['v'].shape, mesh_data['f'].shape, mesh_data['n'].shape,
+    #         mesh_data['vi'].shape, mesh_data['fi'].shape)
+    
+    # #robot_mesh = []
+    # for i in range(len(mesh_data['vi'])-1):
+    #     mesh_o3d = o3d.geometry.TriangleMesh()
+    #     vertices = mesh_data['v'][mesh_data['vi'][i]:mesh_data['vi'][i+1]]
+    #     faces = mesh_data['f'][mesh_data['fi'][i]:mesh_data['fi'][i+1]]
+    #     face_normals = mesh_data['n'][mesh_data['fi'][i]:mesh_data['fi'][i+1]]
+    #     print(vertices.shape, faces.shape, face_normals.shape)
+    #     mesh_o3d.vertices=o3d.utility.Vector3dVector(vertices)
+    #     mesh_o3d.triangles=o3d.utility.Vector3iVector(faces)
+    #     #mesh_o3d.compute_vertex_normals()
+    #     mesh_o3d.triangle_normals = o3d.utility.Vector3dVector(face_normals)
+    #     mesh_o3d.paint_uniform_color([0.7, 0.7, 0.7])
+    #         #robot_mesh.append(mesh_o3d)
+        
+    #     o3d.visualization.draw_geometries(
+    #         [mesh_o3d],
+    #         #mesh_show_back_face=True
+    #     )
+
+    # #print("mesh data for ik", mesh_data_for_ik)
+    # #print("decomposed static mesh data", decomposed_static_mesh_data)
+    # #print("decomposed mesh data", decomposed_mesh_data)
+
+    # # viewer = RobotVisualizer(robot)
+    # # viewer.show([mesh_o3d])
+
+    # assert False
+##################################################################
+
     # Contact Field Acceleration Data Structure (LBVH-S2Bundle)
     accel_structure = contact_field.generate_acceleration_structure(method=cf_accel)
 
     # Object Data.
     object = MeshObject(object_mesh_path)
+    
+    object_mask = np.load('assets/object/testing.npy')
+    #print("mask.shape: ", object_mask.shape)
+    object.create_masked_submesh(object_mask)
     object_area = object.get_area()
+    #print("object area", object_area)
     zo_lr = ((object_area / n_sample_point) ** 0.5) * zo_lr_sigma
-    points, normals = object.sample_point_and_normal(count=n_sample_point)
+    #print("zo_lr", zo_lr)
+    points, normals = object.sample_point_and_normal(count=n_sample_point, return_submesh=True)
+    #print("points, normals", points.shape, normals.shape)
+    #visualize_with_open3d(points, normals)
     points_all = torch.from_numpy(points).cuda().float()
     normals_all = torch.from_numpy(normals).cuda().float()
 
     # Filtering
-    support_point_mask = get_support_point_mask(points_all, normals_all, [0.01])[0]
+    support_point_mask = get_support_point_mask(points_all, normals_all, [0.01])[0] #remove convex (difficult to grasp) points
     points = points_all[torch.where(support_point_mask)]            # good grasp point.
     normals = normals_all[torch.where(support_point_mask)]          # good_grasp_point.
+    #print("points, normals", points.shape, normals.shape)
+    #visualize_with_open3d(points, normals)
 
     # IK GPU buffer. 
     gpu_memory_pool = IKGPUBufferPool(
@@ -173,6 +289,18 @@ def main(args):
             mesh_data=decomposed_static_mesh_data,
             sampling_args=get_object_pose_sampling_args(object_pose_sampling_strategy, robot)
         )
+        print("OBJECT POSES", object_poses.shape, "CONDITION", 
+              "extra_contact_pos", condition['extra_contact_pos'].shape, 
+              "extra_contact_normal", condition['extra_contact_normal'].shape,
+              "extra_contact_mask", condition["extra_contact_mask"].shape)
+        
+        trans_res = get_translation_statistics(object_poses.cpu().numpy())
+        print("Translation Statistics (X, Y, Z):")
+        print(f"Mean: {trans_res['mean']}")
+        print(f"Std:  {trans_res['std']}")
+        print(f"Min:  {trans_res['min']}")
+        print(f"Max:  {trans_res['max']}")
+        assert False
 
         # Contact Field BVH Traversal
         interaction_matrix_hand_point_idx = batch_object_all_contact_fields_interaction(
@@ -282,6 +410,7 @@ def main(args):
     while True:
         idx = random.randint(0, n_result - 1)
         robot_mesh = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=True)
+        #print("robot mesh", robot_mesh)
 
         object_mesh = object.mesh.copy()
         object_mesh.apply_transform(result['object_pose'][idx].cpu().numpy())

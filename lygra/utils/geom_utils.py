@@ -12,15 +12,27 @@ import numpy as np
 
 class MeshObject:
     def __init__(self, obj_path):
-        self.mesh = trimesh.load(obj_path)
+        self.mesh = trimesh.load(obj_path, process=False)
+        self.submesh = None
 
-    def sample_point_and_normal(self, count=2000):
-        points, face_indices = trimesh.sample.sample_surface(self.mesh, count=count)
-        normals = self.mesh.face_normals[face_indices]
+    def create_masked_submesh(self, mask):
+        valid_face_mask = np.all(~mask[self.mesh.faces], axis=1)
+        self.submesh = self.mesh.submesh([valid_face_mask], append=True)
+
+    def sample_point_and_normal(self, count=2000, return_submesh=False):
+        if return_submesh:
+            points, face_indices = trimesh.sample.sample_surface(self.submesh, count=count)
+            normals = self.submesh.face_normals[face_indices]
+        else:
+            points, face_indices = trimesh.sample.sample_surface(self.mesh, count=count)
+            normals = self.mesh.face_normals[face_indices]
         return points, normals 
 
-    def get_area(self):
-        return self.mesh.area 
+    def get_area(self, return_submesh=False):
+        if return_submesh:
+            return self.submesh.area
+        else:
+            return self.mesh.area 
 
 
 def get_tangent_plane(batch_vector):
