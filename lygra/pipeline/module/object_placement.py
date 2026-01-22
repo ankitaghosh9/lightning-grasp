@@ -8,7 +8,7 @@ import torch
 import numpy as np 
 from lygra.utils.geom_utils import get_tangent_plane
 from lygra.pipeline.module.collision import batch_object_hand_collision_check
-
+from scipy.spatial.transform import Rotation as R
 
 def get_object_pose_sampling_args(strategy, robot):
     args = {
@@ -189,3 +189,139 @@ def sample_object_pose(
 
     all_result_pose = torch.cat(all_result_pose, dim=0)
     return all_result_pose, all_result_condition
+
+def get_bounded_object_pose(n, object_data, tree, mesh_data, 
+                            rot_vec=None, 
+                            bounds={'x': [-0.03, 0.07], 
+                                    'y': [-0.13, -0.03], 
+                                    'z': [0.05, 0.15]}):
+    """
+    Generates 'n' valid object poses by sampling random translations within bounds 
+    and performing collision checks.
+
+    Args:
+        n (int): Desired number of valid poses.
+        object_data: Dictionary containing object mesh data (must have 'object_points').
+        tree: Robot kinematic tree (for collision check).
+        mesh_data: Robot mesh data
+        rot_vec: Rotation input (fixed for all samples). Can be:
+                 - None (defaults to Identity)
+                 - Euler angles (1x3) [roll, pitch, yaw]
+                 - Quaternion (1x4)
+                 - Rotation Matrix (3x3)
+        bounds: Dictionary or list defining sampling ranges.
+                Format: {'x': [min, max], 'y': [min, max], 'z': [min, max]}
+                Defaults to a small box above the origin if None.
+
+    Returns:
+        batch_poses (torch.Tensor): [n, 4, 4] CUDA tensor of valid poses.
+        condition (dict): Dummy condition dictionary (zeros).
+    """
+
+    # --- 1. Setup Rotation (Fixed for all samples) ---
+    if rot_vec is None:
+        r_matrix = np.eye(3)
+    else:
+        if isinstance(rot_vec, torch.Tensor):
+            rot_vec = rot_vec.cpu().numpy()
+        rot_val = np.array(rot_vec)
+        
+        # Determine rotation format
+        if rot_val.shape == (3, 3):
+            r_matrix = rot_val
+        elif rot_val.size == 4:
+            r_matrix = R.from_quat(rot_val.flatten()).as_matrix()
+        elif rot_val.size == 3:
+            r_matrix = R.from_euler('xyz', rot_val.flatten()).as_matrix()
+        else:
+            raise ValueError(f"rot_vec has unsupported shape: {rot_val.shape}")
+
+    # Convert rotation to CUDA tensor once
+    r_tensor = torch.from_numpy(r_matrix).float()
+    if torch.cuda.is_available():
+        r_tensor = r_tensor.cuda()
+
+    # --- 2. Setup Bounds ---
+    # Extract limits into tensors for fast batch sampling
+    b_min = torch.tensor([bounds['x'][0], bounds['y'][0], bounds['z'][0]]).float()
+    b_max = torch.tensor([bounds['x'][1], bounds['y'][1], bounds['z'][1]]).float()
+    
+    if torch.cuda.is_available():
+        b_min = b_min.cuda()
+        b_max = b_max.cuda()
+
+    # --- 3. Sampling & Collision Loop ---
+    # We loop until we have collected exactly 'n' valid poses
+    collected_poses = []
+    num_collected = 0
+    
+    # Get object points for collision check [N_points, 3]
+    obj_points = object_data['mesh_points']
+    if isinstance(obj_points, np.ndarray):
+        obj_points = torch.from_numpy(obj_points).float()
+    if torch.cuda.is_available():
+        obj_points = obj_points.cuda()
+
+    # Safety to prevent infinite loops if bounds are invalid (e.g., inside the palm)
+    max_retries = 10
+    retry_count = 0
+    while num_collected < n and retry_count < max_retries:
+        # How many more do we need? Oversample slightly (1.5x) to account for collisions
+        needed = n - num_collected
+        batch_size = int(needed * 1.5) if needed > 10 else needed * 2
+        
+        # A. Sample Random Translations [batch_size, 3]
+        # Formula: rand * (max - min) + min
+        t_samples = torch.rand(batch_size, 3, device=b_min.device) * (b_max - b_min) + b_min
+
+        # B. Construct Poses [batch_size, 4, 4]
+        current_poses = torch.eye(4, device=b_min.device).unsqueeze(0).expand(batch_size, -1, -1).clone()
+        current_poses[:, :3, :3] = r_tensor  # Set rotation
+        current_poses[:, :3, 3] = t_samples  # Set translation
+
+        # C. Transform Object Points for Collision Check
+        # Points: [1, N_pts, 3] -> [B, N_pts, 3]
+        # R_transpose is needed because we are transforming points: p_new = R * p + t
+        # Equivalent to: (p @ R.T) + t
+        rot_batch = current_poses[:, :3, :3] # [B, 3, 3]
+        trans_batch = current_poses[:, :3, 3].unsqueeze(1) # [B, 1, 3]
+        
+        # Batch Matmul: [B, N_pts, 3]
+        transformed_pts = torch.matmul(obj_points.unsqueeze(0), rot_batch.transpose(-1, -2)) + trans_batch
+        #point_transformed = torch.bmm(points, rotation.transpose(-1, -2)) + translation.unsqueeze(1)
+
+        # D. Perform Collision Check
+        # Returns a boolean mask of valid poses
+        no_collision = batch_object_hand_collision_check(
+            tree=tree,
+            mesh=mesh_data,
+            object_point=transformed_pts
+        )
+
+        # E. Filter and Collect
+        selected_idx = torch.where(no_collision)
+        valid_batch = current_poses[selected_idx]
+        
+        if len(valid_batch) > 0:
+            collected_poses.append(valid_batch)
+            num_collected += len(valid_batch)
+        
+        retry_count += 1
+
+    # --- 4. Finalize Output ---
+    if num_collected < n:
+        raise RuntimeError(f"Could only find {num_collected}/{n} valid poses after {max_retries} retries. "
+                           "Your bounds might be overlapping the hand mesh too much.")
+
+    # Concatenate all valid batches and slice to exact size 'n'
+    final_poses = torch.cat(collected_poses, dim=0)[:n]
+
+    # Create dummy conditions (must match final batch size n)
+    device = final_poses.device
+    condition = {
+        "extra_contact_pos": torch.zeros((n, 1, 3), device=device, dtype=torch.float32),
+        "extra_contact_normal": torch.zeros((n, 1, 3), device=device, dtype=torch.float32),
+        "extra_contact_mask": torch.zeros((n, 1), device=device, dtype=torch.float32)
+    }
+
+    return final_poses, condition

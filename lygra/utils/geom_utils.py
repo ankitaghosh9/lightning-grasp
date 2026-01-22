@@ -11,12 +11,26 @@ import numpy as np
 
 
 class MeshObject:
-    def __init__(self, obj_path):
+    def __init__(self, obj_path, object_mask_path=None, scale=1.0):
         self.mesh = trimesh.load(obj_path, process=False)
+        if isinstance(self.mesh, trimesh.Scene):
+            print(f"Merging {len(self.mesh.geometry)} sub-meshes into one...")
+            # 'concatenate=True' merges all sub-meshes into one single Trimesh object
+            self.mesh = self.mesh.dump(concatenate=True)
+        scale_matrix = trimesh.transformations.scale_matrix(scale, [0,0,0])
+        self.mesh.apply_transform(scale_matrix)
+
+        self.mask = np.load(object_mask_path) if object_mask_path is not None else None
         self.submesh = None
 
-    def create_masked_submesh(self, mask):
-        valid_face_mask = np.all(~mask[self.mesh.faces], axis=1)
+    def create_masked_submesh(self, mask=None):
+        if mask is not None:
+            valid_face_mask = np.all(~mask[self.mesh.faces], axis=1)
+        elif self.mask is not None:
+            valid_face_mask = np.all(~self.mask[self.mesh.faces], axis=1)
+        else:
+            print("No mask passed through function called or during object creation. Submesh is None")
+            return
         self.submesh = self.mesh.submesh([valid_face_mask], append=True)
 
     def sample_point_and_normal(self, count=2000, return_submesh=False):

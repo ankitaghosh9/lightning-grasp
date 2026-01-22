@@ -15,9 +15,25 @@ from pathlib import Path
 
 
 def trimesh_to_open3d(mesh: trimesh.Trimesh) -> o3d.geometry.TriangleMesh:
+
+    if hasattr(mesh.visual, 'to_color'):
+        mesh.visual = mesh.visual.to_color()
+        
     o3d_mesh = o3d.geometry.TriangleMesh()
     o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
     o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
+
+    # Check if the trimesh object has color information
+    if mesh.visual.kind in ['vertex', 'face']:
+        # 1. Get vertex colors (trimesh handles converting face->vertex colors automatically)
+        #    result is typically a (N, 4) uint8 array
+        colors = mesh.visual.vertex_colors
+        # 2. Slice the array to drop the Alpha channel (RGBA -> RGB)
+        #    and normalize integers (0-255) to floats (0.0-1.0)
+        colors_rgb = colors[:, :3] / 255.0
+        # 3. Assign to open3d mesh
+        o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(colors_rgb)
+
     o3d_mesh.compute_vertex_normals()
     return o3d_mesh
 

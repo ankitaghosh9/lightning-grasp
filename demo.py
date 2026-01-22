@@ -17,7 +17,7 @@ from lygra.utils.robot_visualizer import RobotVisualizer
 from lygra.utils.transform_utils import batch_object_transform
 
 # Lygra Pipeline
-from lygra.pipeline.module.object_placement import sample_object_pose, get_object_pose_sampling_args
+from lygra.pipeline.module.object_placement import sample_object_pose, get_object_pose_sampling_args, get_bounded_object_pose
 from lygra.pipeline.module.contact_query import batch_object_all_contact_fields_interaction
 from lygra.pipeline.module.contact_collection import sample_pose_and_contact_from_interaction
 from lygra.pipeline.module.contact_optimization import search_contact_point
@@ -39,6 +39,7 @@ import sys
 import open3d as o3d
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as R
 
 def visualize_with_open3d(pos, normal, mask=None):
     """
@@ -122,7 +123,9 @@ def get_args():
     parser.add_argument('--cf_accel', type=str, default='lbvhs2', help='Contact Field Acceleration Structure')
     parser.add_argument('--object_pose_sampling_strategy', type=str, default='canonical', help='Object pose sampling strategy')
     parser.add_argument('--visualize', action='store_true', help='Enable visualization')
-    parser.add_argument('--object_mesh_path', type=str, default="./assets/object/ycb/013_apple/textured.obj", help='Path to the object mesh')
+    parser.add_argument('--object_mesh_path', type=str, default="./assets/object/testing.obj", help='Path to the object mesh')
+    parser.add_argument('--object_mask_path', type=str, default=None, 
+                        help='Path to the object mesh mask of graspable area' )
 
     args = parser.parse_args()
     return args
@@ -142,6 +145,7 @@ def main(args):
     object_pose_sampling_strategy = args.object_pose_sampling_strategy
     visualize = args.visualize
     object_mesh_path = args.object_mesh_path
+    object_mask_path = args.object_mask_path
     zo_lr_sigma = args.zo_lr_sigma
 
     # -----------------
@@ -238,27 +242,32 @@ def main(args):
     accel_structure = contact_field.generate_acceleration_structure(method=cf_accel)
 
     # Object Data.
-    object = MeshObject(object_mesh_path)
-    
-    object_mask = np.load('assets/object/testing.npy')
-    #print("mask.shape: ", object_mask.shape)
-    object.create_masked_submesh(object_mask)
+    object = MeshObject(object_mesh_path, object_mask_path)
+    object.create_masked_submesh()
     object_area = object.get_area()
-    #print("object area", object_area)
     zo_lr = ((object_area / n_sample_point) ** 0.5) * zo_lr_sigma
-    #print("zo_lr", zo_lr)
-    points, normals = object.sample_point_and_normal(count=n_sample_point, return_submesh=True)
-    #print("points, normals", points.shape, normals.shape)
-    #visualize_with_open3d(points, normals)
+
+    #Complete Object Points and Normals
+    points, normals = object.sample_point_and_normal(count=n_sample_point, return_submesh=False)
     points_all = torch.from_numpy(points).cuda().float()
     normals_all = torch.from_numpy(normals).cuda().float()
-
-    # Filtering
     support_point_mask = get_support_point_mask(points_all, normals_all, [0.01])[0] #remove convex (difficult to grasp) points
     points = points_all[torch.where(support_point_mask)]            # good grasp point.
-    normals = normals_all[torch.where(support_point_mask)]          # good_grasp_point.
-    #print("points, normals", points.shape, normals.shape)
-    #visualize_with_open3d(points, normals)
+    normals = normals_all[torch.where(support_point_mask)]          
+
+    #Graspable Object Points and Normals
+    grasp_points, grasp_normals = object.sample_point_and_normal(count=n_sample_point, return_submesh=True)
+    grasp_points_all = torch.from_numpy(grasp_points).cuda().float()
+    grasp_normals_all = torch.from_numpy(grasp_normals).cuda().float()
+    grasp_support_point_mask = get_support_point_mask(grasp_points_all, grasp_normals_all, [0.01])[0] #remove convex (difficult to grasp) points
+    grasp_points = points_all[torch.where(grasp_support_point_mask)]            # good grasp point.
+    grasp_normals = normals_all[torch.where(grasp_support_point_mask)] 
+
+    #Object Data
+    object_data = {'mesh_points': points, 
+                   'mesh_normals': normals, 
+                   'grasp_points': grasp_points,
+                   'grasp_normals': grasp_normals}
 
     # IK GPU buffer. 
     gpu_memory_pool = IKGPUBufferPool(
@@ -274,33 +283,18 @@ def main(args):
     # TODO: Refactor Args/Returns (Nov 10)
     # I should have a class to wrap these arg/return values below as people did for professional graphics engines.
     # But I am too lazy to move, python dict is so comforting for prototyping.
+    # Re: I agree with the original author and have decided to keep it this way too.
 
     print("Launch Inference")
     with torch.no_grad():
-        # Object Placement
-        # Note: We put extra contact points in condition.
-        # condition: [B, 1, 3] contact pos/normal, [B, 1] mask 
-        object_poses, condition = sample_object_pose(
-            n=batch_size_outer, 
-            points=points, 
-            normals=normals, 
-            contact_field=contact_field, 
+
+        # Object Placement: Fixed Rotation and Bounded Translation
+        object_poses, condition = get_bounded_object_pose(
+            n=32, #batch_size_outer, 
+            object_data=object_data,
             tree=tree, 
             mesh_data=decomposed_static_mesh_data,
-            sampling_args=get_object_pose_sampling_args(object_pose_sampling_strategy, robot)
-        )
-        print("OBJECT POSES", object_poses.shape, "CONDITION", 
-              "extra_contact_pos", condition['extra_contact_pos'].shape, 
-              "extra_contact_normal", condition['extra_contact_normal'].shape,
-              "extra_contact_mask", condition["extra_contact_mask"].shape)
-        
-        trans_res = get_translation_statistics(object_poses.cpu().numpy())
-        print("Translation Statistics (X, Y, Z):")
-        print(f"Mean: {trans_res['mean']}")
-        print(f"Std:  {trans_res['std']}")
-        print(f"Min:  {trans_res['min']}")
-        print(f"Max:  {trans_res['max']}")
-        assert False
+            rot_vec=np.array([0.0, 0.0, 0.0]))
 
         # Contact Field BVH Traversal
         interaction_matrix_hand_point_idx = batch_object_all_contact_fields_interaction(
@@ -413,12 +407,22 @@ def main(args):
         #print("robot mesh", robot_mesh)
 
         object_mesh = object.mesh.copy()
+        res = result['object_pose'][idx].cpu().numpy()
+        r = R.from_matrix(res[0:3, 0:3])
+        print("OBJECT ROT", r.as_euler('xyz', degrees=True))
+        print("OBJECT TRANS", res[:3, 3])
         object_mesh.apply_transform(result['object_pose'][idx].cpu().numpy())
         object_mesh_o3d = trimesh_to_open3d(object_mesh)
+        if not object_mesh_o3d.has_vertex_colors():
+            print("WARNING: The Open3D mesh has NO colors! displaying as white.")
+            # If this prints, we need to fix the trimesh conversion logic.
+        else:
+            print(f"Success: Mesh has {len(object_mesh_o3d.vertex_colors)} colored vertices.")
         
         material = o3d.visualization.rendering.MaterialRecord()
         material.shader = "defaultLitTransparency"
-        material.base_color = [245 / 256, 162 / 256, 98 / 256, 0.8]
+        material.base_color = [1.0, 1.0, 1.0, 1.0]
+        #material.base_color = [245 / 256, 162 / 256, 98 / 256, 0.8]
         material.base_metallic = 0.0
         material.base_roughness = 1.0
         object_mesh = {"name": 'object', "geometry": object_mesh_o3d, "material": material}

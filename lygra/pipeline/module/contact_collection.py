@@ -7,7 +7,7 @@
 import torch 
 from lygra import gem
 from lygra.contact_set import get_dependency_matrix, get_link_dependency_matrix, sample_independent_set
-
+import sys
 
 def sample_from_mask_and_gather(mask, data, num_sample):
     """
