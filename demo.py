@@ -10,7 +10,7 @@ from lygra.contact_set import get_dependency_matrix, get_link_dependency_matrix
 from lygra.kinematics import build_kinematics_tree
 from lygra.mesh import get_urdf_mesh, get_urdf_mesh_decomposed, get_urdf_mesh_for_projection, trimesh_to_open3d, load_material_from_mtl
 from lygra.mesh_analyzer import get_support_point_mask
-from lygra.utils.geom_utils import MeshObject
+from lygra.utils.geom_utils import MeshObject, get_plane_surface_points
 from lygra.memory import IKGPUBufferPool
 from lygra.utils.robot_visualizer import RobotVisualizer
 from lygra.utils.transform_utils import batch_object_transform
@@ -131,22 +131,17 @@ def main(args):
     self_collision_link_pairs = torch.from_numpy(self_collision_link_pairs).cuda().int()
 
     contact_field = robot.get_contact_field()
-    # print("Contact Field", contact_field)
     dependency_sets = tree.get_dependency_sets([robot.get_base_link()])
 
     contact_parent_links = contact_field.get_all_parent_link_names()
-    # print("contact_parent_links", contact_parent_links)
     contact_parent_ids = [tree.get_link_id(link) for link in contact_parent_links]
-    # print("contact_parent_ids", contact_parent_ids)
     contact_parent_ids = torch.tensor(contact_parent_ids).cuda()
 
     dependency_matrix = get_link_dependency_matrix(contact_field, dependency_sets)
-    #print("dependency_matrix", dependency_matrix.shape)
     dependency_matrix = dependency_matrix.cuda()
 
     # Contact Field Acceleration Data Structure (LBVH-S2Bundle)
     accel_structure = contact_field.generate_acceleration_structure(method=cf_accel)
-    print(len(accel_structure.contact_lbvhs))
 
     # Object Data. #If no mask provided then submesh defaults to original mesh
     object = MeshObject(object_mesh_path, object_mask_path)
@@ -174,6 +169,15 @@ def main(args):
                    'mesh_normals': normals, 
                    'grasp_points': grasp_points,
                    'grasp_normals': grasp_normals}
+    
+    # Surface Plane Points
+    min_vals, max_vals = object.mesh.bounds[0], object.mesh.bounds[1]
+    surface_points = get_plane_surface_points(0, 1, 0, -1 * min_vals[1])
+    collision_points_all = torch.cat((points_all, surface_points), dim=0)
+    # cloud = trimesh.points.PointCloud(collision_points_all.detach().cpu().numpy(), colors=[255, 0, 0, 255])
+    # scene = trimesh.Scene(cloud)
+    # scene.show()
+
 
     # IK GPU buffer. 
     gpu_memory_pool = IKGPUBufferPool(
@@ -292,10 +296,11 @@ def main(args):
         # Search Free Finger Configuration & Remove Invalid Results (collision).
         # Hand-to-hand  -- AABB broad phase + GJK narrow phase 
         # Hand-to-point -- AABB broad phase + halfplane-test narrow phase
+
         result = batch_assign_free_finger_and_filter(
             tree=tree,
             result=result,
-            object_point=points_all,
+            object_point=collision_points_all,
             self_collision_link_pairs=self_collision_link_pairs,
             decomposed_mesh_data=decomposed_mesh_data
         )
@@ -335,7 +340,6 @@ def main(args):
         
         object_mesh.apply_transform(result['object_pose'][idx].cpu().numpy())
         object_mesh_o3d = trimesh_to_open3d(object_mesh)
-
         material = load_material_from_mtl(object_mesh_path.replace(".obj", ".mtl"))
         object_mesh = {"name": 'object', "geometry": object_mesh_o3d, "material": material}
         geometries.append(object_mesh)
@@ -371,6 +375,14 @@ def main(args):
                 "material": contact_material
             }
             geometries.append(sphere_dict)
+        
+        # # Create Table Visual
+        surface_points_np = surface_points.detach().cpu().numpy()
+        surface_pcd = o3d.geometry.PointCloud()
+        surface_pcd.points = o3d.utility.Vector3dVector(surface_points_np)
+        surface_pcd.transform(result['object_pose'][idx].cpu().numpy())
+        surface_pcd.paint_uniform_color([0.3, 0.3, 0.3])
+        geometries.append(surface_pcd)
 
         viewer.show(robot_mesh + geometries)
 

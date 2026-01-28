@@ -84,3 +84,79 @@ def get_tangent_plane(batch_vector):
 
         
         return x.reshape(*shape, 3), y.reshape(*shape, 3)
+
+def get_plane_surface_points(a, b, c, d, width=0.5, resolution=0.01, device='cuda'):
+    """
+    Generates a dense point cloud representing a plane defined by ax + by + cz + d = 0.
+    
+    Args:
+        a, b, c, d: Coefficients of the plane equation.
+        width: The size of the plane (width x width) in meters.
+        resolution: Spacing between points (smaller = denser collision check).
+        device: Torch device (e.g., 'cuda' or 'cpu').
+        
+    Returns:
+        torch.Tensor: [N, 3] tensor of points on the plane.
+    """
+    # 1. Generate a base grid on the XY plane (z=0) centered at origin
+    steps = int(width / resolution)
+    range_t = torch.linspace(-width/2, width/2, steps, device=device)
+    grid_x, grid_y = torch.meshgrid(range_t, range_t, indexing='xy')
+    
+    # Flatten to create a list of points: [x, y, 0]
+    base_points = torch.stack([
+        grid_x.flatten(),
+        grid_y.flatten(),
+        torch.zeros_like(grid_x.flatten())
+    ], dim=1)  # Shape: [N, 3]
+
+    # 2. Compute the Normal Vector of the target plane
+    normal = torch.tensor([a, b, c], dtype=torch.float32, device=device)
+    norm_magnitude = torch.norm(normal)
+    
+    if norm_magnitude < 1e-6:
+        raise ValueError("Plane normal vector (a, b, c) cannot be zero.")
+    
+    normal = normal / norm_magnitude  # Normalize
+    
+    # 3. Compute Rotation Matrix to align Z-axis (0,0,1) with Plane Normal
+    # We want to rotate "up" (0,0,1) to match (a,b,c)
+    z_axis = torch.tensor([0.0, 0.0, 1.0], device=device)
+    
+    # Axis of rotation = Cross Product (z_axis x normal)
+    rot_axis = torch.cross(z_axis, normal, dim=0)
+    rot_sin = torch.norm(rot_axis)
+    rot_cos = torch.dot(z_axis, normal)
+    
+    # Rotation Matrix calculation
+    if rot_sin < 1e-6:
+        # Normal is parallel to Z-axis
+        if rot_cos > 0:
+            R = torch.eye(3, device=device) # Already aligned
+        else:
+            # 180 degree flip around X axis
+            R = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=torch.float32, device=device) 
+    else:
+        rot_axis = rot_axis / rot_sin
+        K = torch.tensor([
+            [0, -rot_axis[2], rot_axis[1]],
+            [rot_axis[2], 0, -rot_axis[0]],
+            [-rot_axis[1], rot_axis[0], 0]
+        ], device=device)
+        
+        # Rodrigues' rotation formula: I + sin(theta)K + (1-cos(theta))K^2
+        R = torch.eye(3, device=device) + rot_sin * K + (1 - rot_cos) * (K @ K)
+
+    # 4. Rotate the points
+    # (Using matrix multiplication: Points @ R.T)
+    rotated_points = base_points @ R.T
+
+    # 5. Translate the plane
+    # The distance from origin to the plane along the normal is -d / |(a,b,c)|
+    # We shift the points along the normal vector by this distance.
+    distance_from_origin = -d / norm_magnitude
+    translation = normal * distance_from_origin
+    
+    final_points = rotated_points + translation
+
+    return final_points
