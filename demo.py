@@ -10,10 +10,11 @@ from lygra.contact_set import get_dependency_matrix, get_link_dependency_matrix
 from lygra.kinematics import build_kinematics_tree
 from lygra.mesh import get_urdf_mesh, get_urdf_mesh_decomposed, get_urdf_mesh_for_projection, trimesh_to_open3d, load_material_from_mtl
 from lygra.mesh_analyzer import get_support_point_mask
-from lygra.utils.geom_utils import MeshObject, get_plane_surface_points
 from lygra.memory import IKGPUBufferPool
+from lygra.utils.geom_utils import MeshObject, get_plane_surface_points
 from lygra.utils.robot_visualizer import RobotVisualizer
 from lygra.utils.transform_utils import batch_object_transform
+from lygra.utils.save_utils import generate_geodesic_confidence_mask
 
 # Lygra Pipeline
 from lygra.pipeline.module.object_placement import sample_object_pose, get_object_pose_sampling_args, get_bounded_object_pose
@@ -205,7 +206,6 @@ def main(args):
             tree=tree, 
             mesh_data=decomposed_static_mesh_data,
             rot_vec=np.array([0.0, 0.0, 0.0]))
-        print("object poses: ", object_poses.shape)
 
         # Contact Field BVH Traversal: poses x BVH patch x obj points (0 or -1)
         interaction_matrix_hand_point_idx = batch_object_all_contact_fields_interaction(
@@ -320,33 +320,56 @@ def main(args):
     while idx < n_result:
         print(f"Solution Number {idx+1}:")
 
+        # 1. Get Robot Mesh (Static)
         robot_mesh, robot_link_poses = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=True)
         robot_link_poses = np.array(list(robot_link_poses.values()))
-        geometries = []
+        
+        # Initialize list for ALWAYS visible items (Robot, Contacts, Table)
+        static_geometries = []
+        static_geometries.extend(robot_mesh) # Add robot parts
 
-        object_mesh = object.mesh.copy()
-        res = result['object_pose'][idx].cpu().numpy()
-        target_pos = result['target_pos'][idx].cpu().numpy()
+        # 2. Prepare Data for Contacts
+        object_mesh_data = object.mesh.copy() # Copy original mesh data
+        object_pose = result['object_pose'][idx].cpu().numpy()
         contact_link_id = result["contact_link_id"][idx].cpu().numpy()
         contact_link_poses = robot_link_poses[contact_link_id]
         local_contact_pos = result['contact_pos'][idx].cpu().numpy()
         contact_pos_world = (contact_link_poses[:, :3, :3] @ local_contact_pos[..., None]).squeeze(-1) + contact_link_poses[:, :3, 3]
-        # print("Target Positions: ", target_pos)
-        # print("Contact Positions: ", contact_pos_world)
-        
-        r = R.from_matrix(res[0:3, 0:3])
-        print("Object Rotation Values", r.as_euler('xyz', degrees=True))
-        print("Object Translation Values", res[:3, 3])
-        
-        object_mesh.apply_transform(result['object_pose'][idx].cpu().numpy())
-        object_mesh_o3d = trimesh_to_open3d(object_mesh)
+
+        # 3. Create Heatmap Object (Toggle Option A)
+        conf, heat_mesh_geom = generate_geodesic_confidence_mask(object_mesh_data, contact_pos_world, object_pose, sigma=0.05)
+        heat_mesh_geom.apply_transform(object_pose)
+        heat_mesh_o3d = trimesh_to_open3d(heat_mesh_geom)
+        heatmap_element = {"name": "heatmap", "geometry": heat_mesh_o3d, "material": None}
+        static_geometries.append(heatmap_element)
+
+        # 4. Create Textured Object (Toggle Option B)
+        object_mesh_textured = object.mesh.copy()
+        object_mesh_textured.apply_transform(object_pose)
+        object_mesh_o3d = trimesh_to_open3d(object_mesh_textured)
         material = load_material_from_mtl(object_mesh_path.replace(".obj", ".mtl"))
-        object_mesh = {"name": 'object', "geometry": object_mesh_o3d, "material": material}
-        geometries.append(object_mesh)
+        textured_element = {"name": 'object', "geometry": object_mesh_o3d, "material": material, "is_visible": False}
+        static_geometries.append(textured_element)
+
+        # 5. Create Contact Spheres (Static)
+        # Create visuals for final link contact points (Red Spheres)
+        contact_material = o3d.visualization.rendering.MaterialRecord()
+        contact_material.base_color = [1.0, 0.0, 0.0, 1.0]  # Red
+        contact_material.shader = "defaultLit"
+        for i, point in enumerate(contact_pos_world):
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.005, resolution=20)
+            sphere.compute_vertex_normals()
+            sphere.translate(point)
+            sphere_dict = {
+                "name": f"Contact_{i}",
+                "geometry": sphere,
+                "material": contact_material
+            }
+            static_geometries.append(sphere_dict)
 
         # # Create visuals for target contact points (Green Spheres)
         # target_material = o3d.visualization.rendering.MaterialRecord()
-        # target_material.base_color = [0.0, 1.0, 0.0, 1.0]  # Red
+        # target_material.base_color = [0.0, 1.0, 0.0, 1.0]  # Green
         # target_material.shader = "defaultLit"
         # for i, point in enumerate(target_pos):
         #     # Create sphere
@@ -358,33 +381,30 @@ def main(args):
         #         "geometry": sphere,
         #         "material": target_material
         #     }
-        #     geometries.append(sphere_dict)
+        #     static_geometries.append(sphere_dict)
 
-        # Create visuals for final contact points (Red Spheres)
-        contact_material = o3d.visualization.rendering.MaterialRecord()
-        contact_material.base_color = [1.0, 0.0, 0.0, 1.0]  # Red
-        contact_material.shader = "defaultLit"
-        for i, point in enumerate(contact_pos_world):
-            # Create sphere
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.003, resolution=20)
-            sphere.compute_vertex_normals()
-            sphere.translate(point)
-            sphere_dict = {
-                "name": f"Contact_{i}",
-                "geometry": sphere,
-                "material": contact_material
-            }
-            geometries.append(sphere_dict)
         
-        # # Create Table Visual
+        # 6. Create Table/Surface (Static)
         surface_points_np = surface_points.detach().cpu().numpy()
         surface_pcd = o3d.geometry.PointCloud()
         surface_pcd.points = o3d.utility.Vector3dVector(surface_points_np)
         surface_pcd.transform(result['object_pose'][idx].cpu().numpy())
         surface_pcd.paint_uniform_color([0.3, 0.3, 0.3])
-        geometries.append(surface_pcd)
+        surface_material = o3d.visualization.rendering.MaterialRecord()
+        surface_material.shader = "defaultLit"
+        surface_material.point_size = 4.0
+        surface_dict = {
+            "name": "plane",
+            "geometry": surface_pcd,
+            "material": surface_material
+        }
+        static_geometries.append(surface_dict)
 
-        viewer.show(robot_mesh + geometries)
+        # 2. The One-Liner Visualization
+        # This opens a window with a sidebar. 
+        # Click the "Scene" or "List" icon on the right to see checkboxes for your objects.
+        print("Opening Viewer. Expand the 'Geometries' tab on the right to toggle objects.")
+        o3d.visualization.draw(static_geometries, title=f"Solution {idx+1}")
 
         if input("Continue? (Y/n)") in ['n', 'N']:
             break
