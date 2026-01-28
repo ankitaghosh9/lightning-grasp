@@ -20,18 +20,13 @@ class MeshObject:
         scale_matrix = trimesh.transformations.scale_matrix(scale, [0,0,0])
         self.mesh.apply_transform(scale_matrix)
 
-        self.mask = np.load(object_mask_path) if object_mask_path is not None else None
-        self.submesh = None
-
-    def create_masked_submesh(self, mask=None):
-        if mask is not None:
-            valid_face_mask = np.all(~mask[self.mesh.faces], axis=1)
-        elif self.mask is not None:
-            valid_face_mask = np.all(~self.mask[self.mesh.faces], axis=1)
+        if object_mask_path is not None:
+            self.mask = np.load(object_mask_path)
+            valid_face_mask = np.all(~self.mask[self.mesh.faces], axis=1)  
+            self.submesh = self.mesh.submesh([valid_face_mask], append=True)
         else:
-            print("No mask passed through function called or during object creation. Submesh is None")
-            return
-        self.submesh = self.mesh.submesh([valid_face_mask], append=True)
+            self.mask = None
+            self.submesh = self.mesh.copy()
 
     def sample_point_and_normal(self, count=2000, return_submesh=False):
         if return_submesh:

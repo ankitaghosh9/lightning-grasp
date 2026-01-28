@@ -12,31 +12,129 @@ import numpy as np
 import trimesh
 from urdfpy import URDF
 from pathlib import Path 
-
+import math
 
 def trimesh_to_open3d(mesh: trimesh.Trimesh) -> o3d.geometry.TriangleMesh:
-
-    if hasattr(mesh.visual, 'to_color'):
-        mesh.visual = mesh.visual.to_color()
-        
     o3d_mesh = o3d.geometry.TriangleMesh()
     o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
     o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
 
-    # Check if the trimesh object has color information
-    if mesh.visual.kind in ['vertex', 'face']:
-        # 1. Get vertex colors (trimesh handles converting face->vertex colors automatically)
-        #    result is typically a (N, 4) uint8 array
+    # 1. Try to get colors from vertex/face attributes
+    if hasattr(mesh.visual, 'to_color'):
+        mesh.visual = mesh.visual.to_color()
+        
+    colors_rgb = None
+
+    # Check if to_color() successfully generated vertex colors
+    if hasattr(mesh.visual, 'vertex_colors') and len(mesh.visual.vertex_colors) > 0:
         colors = mesh.visual.vertex_colors
-        # 2. Slice the array to drop the Alpha channel (RGBA -> RGB)
-        #    and normalize integers (0-255) to floats (0.0-1.0)
         colors_rgb = colors[:, :3] / 255.0
-        # 3. Assign to open3d mesh
+    
+    # 2. Fallback: If vertex colors are missing, check the Material Base Color (Kd)
+    # This specifically grabs the 'Kd' value (0.27, 0.27, 0.27) from your MTL
+    if colors_rgb is None and hasattr(mesh.visual, 'material'):
+        try:
+            # Main color is usually the diffuse color
+            # shape usually [4] (RGBA) -> take :3 for RGB
+            material_color = mesh.visual.material.main_color[:3] / 255.0
+            # Broadcast this single color to all vertices
+            colors_rgb = np.tile(material_color, (len(mesh.vertices), 1))
+        except:
+            pass
+
+    # 3. Assign to Open3D
+    if colors_rgb is not None:
         o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(colors_rgb)
 
     o3d_mesh.compute_vertex_normals()
     return o3d_mesh
 
+def load_material_from_mtl(mtl_path, default_metallic=0.0):
+    """
+    Parses an MTL file and creates an Open3D MaterialRecord with PBR approximations.
+    
+    Args:
+        mtl_path (str): Path to the .mtl file.
+        default_metallic (float): Fallback metallic value (0.0 for plastic, 1.0 for metal).
+                                  The function attempts to detect metal from the material name.
+    
+    Returns:
+        o3d.visualization.rendering.MaterialRecord
+    """
+    material = o3d.visualization.rendering.MaterialRecord()
+    material.shader = "defaultLit" # Standard PBR shader
+    
+    # Default PBR values
+    base_color = [1.0, 1.0, 1.0, 1.0]
+    color_key = 0
+    roughness = 1.0
+    metallic = default_metallic
+    
+    try:
+        with open(mtl_path, 'r') as f:
+            lines = f.readlines()
+            
+        for line in lines:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            
+            key = parts[0]
+            
+            # 1. Parse Material Name for Heuristics
+            if key == 'newmtl':
+                mat_name = parts[1].lower()
+                # Heuristic: If name contains 'metal', 'steel', 'chrome', etc., force metallic
+                if any(x in mat_name for x in ['metal', 'steel', 'chrome', 'gold', 'silver', 'alum']):
+                    print(f"Detected metallic material name: '{parts[1]}'. Setting metallic=1.0")
+                    metallic = 1.0
+
+            # 2. Parse Diffuse Color (Kd) -> Base Color
+            elif key == 'Kd':
+                color_key+=1
+                # .mtl Kd is RGB [0..1]
+                r, g, b = float(parts[1]), float(parts[2]), float(parts[3])
+                base_color[0] = r
+                base_color[1] = g
+                base_color[2] = b
+                
+            # 3. Parse Opacity (d) -> Alpha
+            elif key == 'd':
+                alpha = float(parts[1])
+                base_color[3] = alpha
+                if alpha < 1.0:
+                    material.shader = "defaultLitTransparency"
+
+            # 4. Parse Shininess (Ns) -> Roughness
+            # .mtl Ns is usually 0 to 1000 (0=Rough, 1000=Mirror)
+            # PBR Roughness is 0 to 1 (0=Mirror, 1=Rough)
+            elif key == 'Ns':
+                ns_val = float(parts[1])
+                # Logarithmic mapping fits perception better than linear
+                # Ns=558 (your file) -> Roughness ~0.1 (Shiny)
+                # Ns=0   -> Roughness 1.0 (Matte)
+                if ns_val > 0:
+                    roughness = 1.0 - (math.log(ns_val + 1) / math.log(1001))
+                else:
+                    roughness = 1.0
+                
+                # Clamp to safe range
+                roughness = max(0.0, min(1.0, roughness))
+
+    except FileNotFoundError:
+        print(f"Warning: MTL file {mtl_path} not found. Using defaults.")
+    except Exception as e:
+        print(f"Error parsing MTL: {e}. Using defaults.")
+    
+
+
+    # Assign final values
+    material.base_color = [1.0, 1.0, 1.0, 1.0] if color_key > 0 else base_color
+    material.base_roughness = roughness
+    material.base_metallic = metallic
+    
+    print(f"Created Material | Color: {base_color[:3]} | Roughness: {roughness:.2f} | Metallic: {metallic}")
+    return material
 
 class RobotMesh:
     def __init__(self, robot_path, mesh_scale=1.0):

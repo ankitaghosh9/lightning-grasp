@@ -35,3 +35,22 @@ def load_pickle(filepath):
     """Load a pickle file into a Python object."""
     with open(filepath, 'rb') as f:
         return pickle.load(f)
+
+def print_dict_structure(d, indent=0):
+    """
+    Recursively parses a nested dictionary and prints the key structure.
+    """
+    for key, value in d.items():
+        # Print the current key with indentation
+        print('  ' * indent + str(key))
+        
+        # If the value is another dictionary, recurse into it
+        if isinstance(value, dict):
+            print_dict_structure(value, indent + 1)
+        # Optional: Handle lists of dictionaries
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    print_dict_structure(item, indent + 1)
+        else:
+            print(value.shape)

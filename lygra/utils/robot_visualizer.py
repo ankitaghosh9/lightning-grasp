@@ -49,11 +49,10 @@ class RobotVisualizer:
                 material.base_metallic = 0.1
                 material.base_roughness = 1.0
                 o3d_meshes.append({"name": str(i), "geometry": m, "material": material})
-            return o3d_meshes
-        
+            return o3d_meshes, link_poses
         else:
             mesh = trimesh.util.concatenate(self.robot_mesh.get_all_link_meshes(link_poses, visual=visual, to_o3d=False))
-            return mesh
+            return mesh, link_poses
 
     def show(self, visuals):
         show_visualization(visuals)
