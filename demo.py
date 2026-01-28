@@ -41,7 +41,10 @@ def get_args():
     parser.add_argument('--robot', type=str, default="allegro", help='Robot Name')
     parser.add_argument('--batch_size_outer', type=int, default=64, help='Outer batch size (Object Pose)')
     parser.add_argument('--batch_size_inner', type=int, default=64, help='Inner batch size (Contact Domain Variants)')
-    parser.add_argument('--n_contact', type=int, default=3, help='Number of non-static contacts to optimize')
+    parser.add_argument('--n_contact_links', nargs='*', default=['ffdistal', 'ffmiddle', 'thdistal'], 
+                        choices = ['rfdistal', 'lfdistal', 'ffmiddle', 'lfmiddle', 'ffdistal', 'rfmiddle', 'thdistal', 'mfmiddle', 'mfdistal'], 
+                        help='Name of the links to be involved in the grasp')
+    #parser.add_argument('--n_contact', type=int, default=3, help='Number of non-static contacts to optimize')
     parser.add_argument('--n_sample_point', type=int, default=2048, help='Number of sampled object points')
     parser.add_argument('--ik_finetune_iter', type=int, default=5, help='Number of IK finetune iterations')
     parser.add_argument('--zo_lr_sigma', type=float, default=5, help='Sigma of the Zeroth-order Optimizer')
@@ -64,7 +67,8 @@ def get_args():
 def main(args):
     batch_size_outer = args.batch_size_outer
     batch_size_inner = args.batch_size_inner
-    n_contact = args.n_contact
+    n_contact_links = args.n_contact_links
+    #n_contact = args.n_contact
     n_sample_point = args.n_sample_point
     ik_finetune_iter = args.ik_finetune_iter
     cf_accel = args.cf_accel
@@ -73,6 +77,11 @@ def main(args):
     object_mesh_path = args.object_mesh_path
     object_mask_path = args.object_mask_path
     zo_lr_sigma = args.zo_lr_sigma
+
+    n_contact = set()
+    for l in n_contact_links:
+        n_contact.add(l[0:2])
+    n_contact = len(n_contact)
 
     # -----------------
     # Preparation Stage 
@@ -125,12 +134,10 @@ def main(args):
     # print("Contact Field", contact_field)
     dependency_sets = tree.get_dependency_sets([robot.get_base_link()])
 
-    contact_all_links = contact_field.get_all_contact_link_names()
-    #print("contact_all_links", contact_all_links)
     contact_parent_links = contact_field.get_all_parent_link_names()
-    #print("contact_parent_links", len(contact_parent_links))
+    # print("contact_parent_links", contact_parent_links)
     contact_parent_ids = [tree.get_link_id(link) for link in contact_parent_links]
-    #print("contact_parent_ids", len(contact_parent_ids))
+    # print("contact_parent_ids", contact_parent_ids)
     contact_parent_ids = torch.tensor(contact_parent_ids).cuda()
 
     dependency_matrix = get_link_dependency_matrix(contact_field, dependency_sets)
@@ -139,6 +146,7 @@ def main(args):
 
     # Contact Field Acceleration Data Structure (LBVH-S2Bundle)
     accel_structure = contact_field.generate_acceleration_structure(method=cf_accel)
+    print(len(accel_structure.contact_lbvhs))
 
     # Object Data. #If no mask provided then submesh defaults to original mesh
     object = MeshObject(object_mesh_path, object_mask_path)
@@ -193,6 +201,7 @@ def main(args):
             tree=tree, 
             mesh_data=decomposed_static_mesh_data,
             rot_vec=np.array([0.0, 0.0, 0.0]))
+        print("object poses: ", object_poses.shape)
 
         # Contact Field BVH Traversal: poses x BVH patch x obj points (0 or -1)
         interaction_matrix_hand_point_idx = batch_object_all_contact_fields_interaction(
@@ -200,10 +209,13 @@ def main(args):
             object_normal=grasp_normals, 
             object_pose=object_poses, 
             accel_structure=accel_structure
-        )     
+        )    
 
+        # Filtering to have only desired links involved in the grasp
         interaction_matrix = (interaction_matrix_hand_point_idx >= 0).int()
         link_interaction_matrix = contact_field.reduce_link_interaction(interaction_matrix)
+        link_mask = torch.tensor(np.isin(contact_field.all_contact_link_names, n_contact_links), dtype=torch.int, device='cuda')
+        link_interaction_matrix = link_interaction_matrix * link_mask[None, :, None]
 
         # Get Contact Domain
         contact_domain_pos, contact_domain_normal, contact_domain_point_idx, \
@@ -314,8 +326,8 @@ def main(args):
         contact_link_poses = robot_link_poses[contact_link_id]
         local_contact_pos = result['contact_pos'][idx].cpu().numpy()
         contact_pos_world = (contact_link_poses[:, :3, :3] @ local_contact_pos[..., None]).squeeze(-1) + contact_link_poses[:, :3, 3]
-        print("Target Positions: ", target_pos)
-        print("Contact Positions: ", contact_pos_world)
+        # print("Target Positions: ", target_pos)
+        # print("Contact Positions: ", contact_pos_world)
         
         r = R.from_matrix(res[0:3, 0:3])
         print("Object Rotation Values", r.as_euler('xyz', degrees=True))
