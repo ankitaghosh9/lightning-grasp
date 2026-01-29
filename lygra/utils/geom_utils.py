@@ -85,7 +85,7 @@ def get_tangent_plane(batch_vector):
         
         return x.reshape(*shape, 3), y.reshape(*shape, 3)
 
-def get_plane_surface_points(a, b, c, d, width=0.5, resolution=0.01, device='cuda'):
+def get_plane_surface_points(a, b, c, d, width=0.4, resolution=0.005, device='cuda'):
     """
     Generates a dense point cloud representing a plane defined by ax + by + cz + d = 0.
     

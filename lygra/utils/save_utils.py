@@ -60,14 +60,8 @@ def print_dict_structure(d, indent=0):
         else:
             print(value.shape)
 
-import trimesh
-import torch
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse.csgraph import dijkstra
-from trimesh.visual import ColorVisuals
-
-def generate_geodesic_confidence_mask(mesh, contact_pos_world, object_pose, sigma=0.05, max_dist=0.05, device='cuda'):
+def generate_geodesic_confidence_mask(mesh, contact_pos_world, object_pose, contact_link_names, 
+                                      sigma=0.05, max_dist=0.05, device='cuda'):
     """
     Generates a Geodesic confidence mask where confidence is:
     - 1.0 at the contact point.
@@ -111,10 +105,7 @@ def generate_geodesic_confidence_mask(mesh, contact_pos_world, object_pose, sigm
     )
 
     # --- 5. Find Min Distance for each Vertex ---
-    if len(vertex_indices) > 1:
-        min_geodesic_dists = np.min(distances_matrix, axis=0)
-    else:
-        min_geodesic_dists = distances_matrix
+    min_geodesic_dists = distances_matrix
 
     # --- 6. Apply Normalized Gaussian Decay ---
     
@@ -144,6 +135,11 @@ def generate_geodesic_confidence_mask(mesh, contact_pos_world, object_pose, sigm
         # Clip to ensure numerical stability (0.0 to 1.0)
         confidence_values[valid_mask] = np.clip(scaled_vals, 0.0, 1.0)
 
+    if len(vertex_indices) > 1:
+        confidence_values = np.max(confidence_values, axis=0)
+    else:
+        confidence_values = confidence_values
+    
     # --- 7. Visualization ---
     import matplotlib.pyplot as plt
     cmap = plt.get_cmap('jet')

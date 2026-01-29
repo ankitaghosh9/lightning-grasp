@@ -321,12 +321,13 @@ def main(args):
         print(f"Solution Number {idx+1}:")
 
         # 1. Get Robot Mesh (Static)
-        robot_mesh, robot_link_poses = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=True)
-        robot_link_poses = np.array(list(robot_link_poses.values()))
+        robot_mesh, robot_poses_dict = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=True)
+        robot_link_poses = np.array(list(robot_poses_dict.values()))
+        robot_link_names = list(robot_poses_dict.keys())
         
         # Initialize list for ALWAYS visible items (Robot, Contacts, Table)
-        static_geometries = []
-        static_geometries.extend(robot_mesh) # Add robot parts
+        geometries = []
+        geometries.extend(robot_mesh) # Add robot parts
 
         # 2. Prepare Data for Contacts
         object_mesh_data = object.mesh.copy() # Copy original mesh data
@@ -336,20 +337,22 @@ def main(args):
         local_contact_pos = result['contact_pos'][idx].cpu().numpy()
         contact_pos_world = (contact_link_poses[:, :3, :3] @ local_contact_pos[..., None]).squeeze(-1) + contact_link_poses[:, :3, 3]
 
-        # 3. Create Heatmap Object (Toggle Option A)
-        conf, heat_mesh_geom = generate_geodesic_confidence_mask(object_mesh_data, contact_pos_world, object_pose, sigma=0.05)
-        heat_mesh_geom.apply_transform(object_pose)
-        heat_mesh_o3d = trimesh_to_open3d(heat_mesh_geom)
-        heatmap_element = {"name": "heatmap", "geometry": heat_mesh_o3d, "material": None}
-        static_geometries.append(heatmap_element)
-
-        # 4. Create Textured Object (Toggle Option B)
+        # 3. Create Textured Object (Toggle Option A)
         object_mesh_textured = object.mesh.copy()
         object_mesh_textured.apply_transform(object_pose)
         object_mesh_o3d = trimesh_to_open3d(object_mesh_textured)
         material = load_material_from_mtl(object_mesh_path.replace(".obj", ".mtl"))
-        textured_element = {"name": 'object', "geometry": object_mesh_o3d, "material": material, "is_visible": False}
-        static_geometries.append(textured_element)
+        textured_element = {"name": 'object', "geometry": object_mesh_o3d, "material": material}
+        geometries.append(textured_element)
+
+        # 4. Create Heatmap Object (Toggle Option B)
+        contact_link_names = [robot_link_names[idx] for idx in contact_link_id]
+        conf, heat_mesh_geom = generate_geodesic_confidence_mask(object_mesh_data, contact_pos_world, object_pose, contact_link_names)
+        heat_mesh_geom.apply_transform(object_pose)
+        heat_mesh_o3d = trimesh_to_open3d(heat_mesh_geom)
+        heatmap_element = {"name": "heatmap", "geometry": heat_mesh_o3d, "material": None, "is_visible": False}
+        geometries.append(heatmap_element)
+        print("Grasp Confidence", conf.shape)
 
         # 5. Create Contact Spheres (Static)
         # Create visuals for final link contact points (Red Spheres)
@@ -365,7 +368,7 @@ def main(args):
                 "geometry": sphere,
                 "material": contact_material
             }
-            static_geometries.append(sphere_dict)
+            geometries.append(sphere_dict)
 
         # # Create visuals for target contact points (Green Spheres)
         # target_material = o3d.visualization.rendering.MaterialRecord()
@@ -381,7 +384,7 @@ def main(args):
         #         "geometry": sphere,
         #         "material": target_material
         #     }
-        #     static_geometries.append(sphere_dict)
+        #     geometries.append(sphere_dict)
 
         
         # 6. Create Table/Surface (Static)
@@ -398,13 +401,12 @@ def main(args):
             "geometry": surface_pcd,
             "material": surface_material
         }
-        static_geometries.append(surface_dict)
+        geometries.append(surface_dict)
 
         # 2. The One-Liner Visualization
         # This opens a window with a sidebar. 
         # Click the "Scene" or "List" icon on the right to see checkboxes for your objects.
-        print("Opening Viewer. Expand the 'Geometries' tab on the right to toggle objects.")
-        o3d.visualization.draw(static_geometries, title=f"Solution {idx+1}")
+        o3d.visualization.draw(geometries, title=f"Solution {idx+1}")
 
         if input("Continue? (Y/n)") in ['n', 'N']:
             break
