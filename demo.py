@@ -11,10 +11,12 @@ from lygra.kinematics import build_kinematics_tree
 from lygra.mesh import get_urdf_mesh, get_urdf_mesh_decomposed, get_urdf_mesh_for_projection, trimesh_to_open3d, load_material_from_mtl
 from lygra.mesh_analyzer import get_support_point_mask
 from lygra.memory import IKGPUBufferPool
-from lygra.utils.geom_utils import MeshObject, get_plane_surface_points
+from lygra.utils.geom_utils import MeshObject
 from lygra.utils.robot_visualizer import RobotVisualizer
 from lygra.utils.transform_utils import batch_object_transform
-from lygra.utils.save_utils import generate_geodesic_confidence_mask
+from lygra.utils.isaac_utils import generate_geodesic_confidence_mask, load_obj_rot_from_isaac, save_grasps_to_json_isaac_converted
+#from lygra.utils.save_utils import print_dict_structure
+
 
 # Lygra Pipeline
 from lygra.pipeline.module.object_placement import sample_object_pose, get_object_pose_sampling_args, get_bounded_object_pose
@@ -23,7 +25,7 @@ from lygra.pipeline.module.contact_collection import sample_pose_and_contact_fro
 from lygra.pipeline.module.contact_optimization import search_contact_point
 from lygra.pipeline.module.kinematics import batch_ik, batch_contact_adjustment
 from lygra.pipeline.module.collision import batch_filter_collision
-from lygra.pipeline.module.postprocess import batch_assign_free_finger_and_filter
+from lygra.pipeline.module.postprocess import batch_assign_free_finger_and_filter, batch_generate_bg_surface
 
 # Common 
 import torch 
@@ -56,6 +58,8 @@ def get_args():
     parser.add_argument('--object_mesh_path', type=str, default="./assets/object/testing.obj", help='Path to the object mesh')
     parser.add_argument('--object_mask_path', type=str, default=None, 
                         help='Path to the object mesh mask of graspable area' )
+    parser.add_argument('--object_pose_json_path', type=str, default=None, 
+                        help='Path to the object mesh mask of graspable area' )
 
     args = parser.parse_args()
     return args
@@ -77,6 +81,7 @@ def main(args):
     visualize = args.visualize
     object_mesh_path = args.object_mesh_path
     object_mask_path = args.object_mask_path
+    object_pose_json_path = args.object_pose_json_path
     zo_lr_sigma = args.zo_lr_sigma
 
     n_contact = set()
@@ -94,7 +99,8 @@ def main(args):
         urdf_path=robot.urdf_path,
         active_joint_names=robot.get_active_joints()
     )
-    #print("TREE", tree.link_name_to_id)
+    # print("JOINT", tree.active_joints)
+    # print("JOINT IDS: ", [tree.get_joint_id_from_active_joint_id(i) for i in range(len(tree.active_joints))])
 
     # Robot Mesh Data
     mesh_data = get_urdf_mesh(
@@ -146,6 +152,7 @@ def main(args):
 
     # Object Data. #If no mask provided then submesh defaults to original mesh
     object = MeshObject(object_mesh_path, object_mask_path)
+    rot_matrix = load_obj_rot_from_isaac(object_pose_json_path) #"assets/testing_tool_4.json")
     object_area = object.get_area()
     zo_lr = ((object_area / n_sample_point) ** 0.5) * zo_lr_sigma
 
@@ -170,14 +177,6 @@ def main(args):
                    'mesh_normals': normals, 
                    'grasp_points': grasp_points,
                    'grasp_normals': grasp_normals}
-    
-    # Surface Plane Points
-    min_vals, max_vals = object.mesh.bounds[0], object.mesh.bounds[1]
-    surface_points = get_plane_surface_points(0, 1, 0, -1 * min_vals[1])
-    collision_points_all = torch.cat((points_all, surface_points), dim=0)
-    # cloud = trimesh.points.PointCloud(collision_points_all.detach().cpu().numpy(), colors=[255, 0, 0, 255])
-    # scene = trimesh.Scene(cloud)
-    # scene.show()
 
 
     # IK GPU buffer. 
@@ -205,7 +204,7 @@ def main(args):
             object_data=object_data,
             tree=tree, 
             mesh_data=decomposed_static_mesh_data,
-            rot_vec=np.array([0.0, 0.0, 0.0]))
+            rot_vec=rot_matrix) #np.array([0.0, 0.0, 0.0]))
 
         # Contact Field BVH Traversal: poses x BVH patch x obj points (0 or -1)
         interaction_matrix_hand_point_idx = batch_object_all_contact_fields_interaction(
@@ -293,20 +292,27 @@ def main(args):
         )
 
         # Postprocessing: 
+        # Sample surface plane points for the object
         # Search Free Finger Configuration & Remove Invalid Results (collision).
         # Hand-to-hand  -- AABB broad phase + GJK narrow phase 
         # Hand-to-point -- AABB broad phase + halfplane-test narrow phase
 
+        # # # Surface Plane Points
+        surface_points = batch_generate_bg_surface(result=result, object_point=points_all)
+        result["surface_points"] = surface_points
+
         result = batch_assign_free_finger_and_filter(
             tree=tree,
             result=result,
-            object_point=collision_points_all,
+            object_point=points_all,
             self_collision_link_pairs=self_collision_link_pairs,
             decomposed_mesh_data=decomposed_mesh_data
         )
 
     n_result = len(result['q'])
     print("Number of Solutions:", n_result)
+    save_grasps_to_json_isaac_converted(result, object_pose_json_path, "assets/testing_hand_pose.json")
+    # print_dict_structure(result)
    
     # -----------------
     # Visualize Results
@@ -324,7 +330,7 @@ def main(args):
         robot_mesh, robot_poses_dict = viewer.get_mesh_fk(result['q'][idx:idx+1].detach().cpu().numpy(), visual=True)
         robot_link_poses = np.array(list(robot_poses_dict.values()))
         robot_link_names = list(robot_poses_dict.keys())
-        
+
         # Initialize list for ALWAYS visible items (Robot, Contacts, Table)
         geometries = []
         geometries.extend(robot_mesh) # Add robot parts
@@ -352,7 +358,6 @@ def main(args):
         heat_mesh_o3d = trimesh_to_open3d(heat_mesh_geom)
         heatmap_element = {"name": "heatmap", "geometry": heat_mesh_o3d, "material": None, "is_visible": False}
         geometries.append(heatmap_element)
-        print("Grasp Confidence", conf.shape)
 
         # 5. Create Contact Spheres (Static)
         # Create visuals for final link contact points (Red Spheres)
@@ -388,20 +393,20 @@ def main(args):
 
         
         # 6. Create Table/Surface (Static)
-        surface_points_np = surface_points.detach().cpu().numpy()
-        surface_pcd = o3d.geometry.PointCloud()
-        surface_pcd.points = o3d.utility.Vector3dVector(surface_points_np)
-        surface_pcd.transform(result['object_pose'][idx].cpu().numpy())
-        surface_pcd.paint_uniform_color([0.3, 0.3, 0.3])
-        surface_material = o3d.visualization.rendering.MaterialRecord()
-        surface_material.shader = "defaultLit"
-        surface_material.point_size = 4.0
-        surface_dict = {
-            "name": "plane",
-            "geometry": surface_pcd,
-            "material": surface_material
-        }
-        geometries.append(surface_dict)
+        if result['surface_points'] is not None:
+            surface_points = result['surface_points'][idx].cpu().numpy()
+            surface_pcd = o3d.geometry.PointCloud()
+            surface_pcd.points = o3d.utility.Vector3dVector(surface_points)
+            surface_pcd.paint_uniform_color([0.3, 0.3, 0.3])
+            surface_material = o3d.visualization.rendering.MaterialRecord()
+            surface_material.shader = "defaultLit"
+            surface_material.point_size = 4.0
+            surface_dict = {
+                "name": "plane",
+                "geometry": surface_pcd,
+                "material": surface_material
+            }
+            geometries.append(surface_dict)
 
         # 2. The One-Liner Visualization
         # This opens a window with a sidebar. 
