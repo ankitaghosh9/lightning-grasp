@@ -70,9 +70,13 @@ python demo.py --visualize
 This will visualize results on Allegro + YCB Apple setup. 
 ![](misc/output.png)
 
-To use other hands and objects, run:
+To use other hands and objects, run the following command to check all available command-line input options:
 ```
-python demo.py --visualize --robot shadow --object_mesh_path ./assets/object/ycb/042_adjustable_wrench/textured.obj
+python demo.py --help
+```
+Example Usage:
+```
+python demo.py --visualize --robot shadow --object_mesh_path ./assets/testing_tool_4.obj --object_mask_path ./assets/testing_tool_4.npy --object_pose_json_path ./assets/testing_tool_4.json --save_results_lygra ./assets/testing_lygra_results.json --save_results_isaac ./assets/testing_isaac_results.json
 ```
 Ensure your object mesh is scaled to meter units before processing. ;)
 
