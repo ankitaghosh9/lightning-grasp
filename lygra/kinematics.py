@@ -436,6 +436,9 @@ def batch_fk(
         joint_pose = torch.bmm(parent_link_transform, all_joint_origins[:, joint_id])
 
         active_joint_id = tree.get_active_joint_id_from_joint_id(joint_id)
+        # print("joint_id", joint_id)
+        # print("joint name", tree.joints[joint_id])
+        # print("active_joint_id", active_joint_id)
         if active_joint_id >= 0:
             all_joint_result[:, active_joint_id] = joint_pose 
 

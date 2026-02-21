@@ -7,6 +7,24 @@
 from tqdm import tqdm 
 from lygra.pipeline.module.collision import batch_filter_collision
 import torch
+from lygra.utils.transform_utils import batch_object_transform
+from lygra.utils.geom_utils import get_plane_surface_points_batch
+
+def batch_generate_bg_surface(
+   result,
+   object_point,     
+):
+    object_pose = result["object_pose"]
+    #print("object pose shape", object_pose.shape)
+    batch_size = object_pose.shape[0]
+    #print("batch size", batch_size)
+    object_point = batch_object_transform(object_pose, object_point)["pos"]
+    #print("object point shape", object_point.shape)
+    min_vals = torch.amin(object_point[:, :, 1], dim=1)
+    #print("min vals", min_vals.shape)
+    surface_points = get_plane_surface_points_batch(torch.zeros(batch_size), torch.ones(batch_size), 
+                                                    torch.zeros(batch_size), -1 * min_vals)
+    return surface_points
 
 
 def batch_assign_free_finger_and_filter(
@@ -37,7 +55,7 @@ def batch_assign_free_finger_and_filter(
         q_mask = tmp_result["q_mask"].float()
        
         free_q = torch.rand_like(q) * (joint_limit_upper - joint_limit_lower) + joint_limit_lower
-        tmp_result["q"] = free_q * (1 - q_mask) + q * q_mask 
+        tmp_result["q"] = free_q * (1 - q_mask) + q * q_mask # rand_value * unassigned_joints + fixed_value * assigned_joints
         
         success_mask = batch_filter_collision(
             tree,
@@ -46,7 +64,8 @@ def batch_assign_free_finger_and_filter(
             object_point,
             self_collision_link_pairs,
             decomposed_mesh_data,
-            ret_mask_only=True
+            ret_mask_only=True,
+            surface_points=tmp_result["surface_points"]
         )
        
         for k, v in tmp_result.items():

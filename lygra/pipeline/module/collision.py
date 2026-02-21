@@ -123,9 +123,13 @@ def batch_filter_collision(
     object_point,
     self_collision_link_pairs,
     decomposed_mesh_data,
-    ret_mask_only=True
+    ret_mask_only=True,
+    surface_points=None
 ):
     object_point = batch_object_transform(object_pose, object_point)["pos"]
+    if surface_points is not None:
+        object_point = torch.cat((object_point, surface_points), dim=1)
+    
     mask_object = batch_object_hand_collision_check(
         tree=tree, 
         q=q, 

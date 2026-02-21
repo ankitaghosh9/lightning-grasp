@@ -225,7 +225,8 @@ class RobotMesh:
                 if transform is None:
                     # If no transform specified, use identity matrix (no transformation)
                     transform = np.eye(4)
-              
+                
+                #print("transform:", transform)
                 mesh.apply_transform(transform)
                 if mesh is not None:
                     trimesh_objects.append(mesh)

@@ -85,6 +85,130 @@ def get_tangent_plane(batch_vector):
         
         return x.reshape(*shape, 3), y.reshape(*shape, 3)
 
+import torch
+
+def get_plane_surface_points_batch(a, b, c, d, width=0.4, resolution=0.005, device='cuda'):
+    """
+    Generates a batch of dense point clouds representing planes defined by ax + by + cz + d = 0.
+    
+    Args:
+        a, b, c, d: Tensors of shape (B,) or (B, 1) representing plane coefficients.
+        width: Scalar, size of the plane.
+        resolution: Scalar, spacing between points.
+        device: Torch device.
+        
+    Returns:
+        torch.Tensor: [B, N, 3] tensor of points, where B is batch size.
+    """
+    # 1. Standardization: Ensure inputs are 1D tensors (Batch Size)
+    # We allow inputs to be lists or scalars, converting them to tensors
+    def to_tensor(x):
+        t = torch.as_tensor(x, device=device, dtype=torch.float32)
+        return t.flatten()
+    
+    a, b, c, d = to_tensor(a), to_tensor(b), to_tensor(c), to_tensor(d)
+    
+    # Check consistent batch size
+    batch_size = a.shape[0]
+    assert b.shape[0] == batch_size and c.shape[0] == batch_size and d.shape[0] == batch_size
+    
+    # 2. Generate Base Grid (Z=0) - Created once, expanded later
+    steps = int(width / resolution)
+    range_t = torch.linspace(-width/2, width/2, steps, device=device)
+    grid_x, grid_y = torch.meshgrid(range_t, range_t, indexing='xy')
+    
+    # Shape: [1, N, 3]
+    base_points = torch.stack([
+        grid_x.flatten(),
+        grid_y.flatten(),
+        torch.zeros_like(grid_x.flatten())
+    ], dim=1).unsqueeze(0) 
+    
+    # 3. Process Normals
+    # Stack coefficients -> [B, 3]
+    normals = torch.stack([a, b, c], dim=1)
+    norm_mags = torch.norm(normals, dim=1, keepdim=True)
+    
+    # Avoid division by zero
+    norm_mags = torch.where(norm_mags < 1e-8, torch.ones_like(norm_mags), norm_mags)
+    normals = normals / norm_mags  # [B, 3]
+    
+    # 4. Compute Rotation Matrices (Batch Rodrigues)
+    # We align Z-axis (0,0,1) to the target Normals
+    z_axis = torch.tensor([0.0, 0.0, 1.0], device=device).expand(batch_size, 3)
+    
+    # Cross Product: [B, 3]
+    rot_axis = torch.linalg.cross(z_axis, normals)
+    rot_sin = torch.norm(rot_axis, dim=1, keepdim=True) # [B, 1]
+    rot_cos = torch.sum(z_axis * normals, dim=1, keepdim=True) # Dot product [B, 1]
+    
+    # -- Handling Singularities (Parallel vectors) --
+    # Mask where sin(theta) is near zero (vectors are parallel or anti-parallel)
+    is_singular = rot_sin.squeeze() < 1e-6
+    
+    # Normalize axis safely (avoid NaN for singular cases)
+    # We add 1e-8 to denominator just for the math, but will overwrite these indices later
+    axis_norm = rot_axis / (rot_sin + 1e-8)
+    
+    # Construct Skew-Symmetric Matrices K: [B, 3, 3]
+    # K = [[0, -z, y], [z, 0, -x], [-y, x, 0]]
+    zeros = torch.zeros_like(axis_norm[:, 0])
+    K = torch.stack([
+        torch.stack([zeros, -axis_norm[:, 2], axis_norm[:, 1]], dim=1),
+        torch.stack([axis_norm[:, 2], zeros, -axis_norm[:, 0]], dim=1),
+        torch.stack([-axis_norm[:, 1], axis_norm[:, 0], zeros], dim=1)
+    ], dim=1)
+    
+    # Identity Matrix: [B, 3, 3]
+    I = torch.eye(3, device=device).unsqueeze(0).expand(batch_size, 3, 3)
+    
+    # Rodrigues Formula: R = I + sin*K + (1-cos)*K^2
+    # [B, 3, 3]
+    R = I + (rot_sin.unsqueeze(-1) * K) + ((1 - rot_cos.unsqueeze(-1)) * (K @ K))
+    
+    # -- Fix Singularities --
+    # If cos > 0 (Parallel): R = Identity
+    # If cos < 0 (Anti-Parallel): R = 180 deg flip (e.g. diagonal 1, -1, -1)
+    if is_singular.any():
+        # Indices where singular
+        idx_sing = torch.where(is_singular)[0]
+        
+        # Check cosine sign for these indices
+        cos_vals = rot_cos[idx_sing].squeeze()
+        
+        # Create Identity and Flip matrices
+        I_sing = torch.eye(3, device=device).unsqueeze(0).expand(len(idx_sing), 3, 3)
+        Flip_sing = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], 
+                                 dtype=torch.float32, device=device).unsqueeze(0).expand(len(idx_sing), 3, 3)
+        
+        # Choose based on cos > 0
+        R_corrected = torch.where(cos_vals.view(-1, 1, 1) > 0, I_sing, Flip_sing)
+        
+        # Overwrite in main R tensor
+        R[idx_sing] = R_corrected
+
+    # 5. Rotate Points
+    # Base: [1, N, 3] -> Expand to [B, N, 3]
+    points_expanded = base_points.expand(batch_size, -1, -1)
+    
+    # Batch Matrix Multiplication: (B, N, 3) @ (B, 3, 3)^T
+    # We transpose R to (B, 3, 3) -> (B, 3, 3) for correct multiplication on the right
+    rotated_points = torch.bmm(points_expanded, R.transpose(1, 2))
+    
+    # 6. Translate Points
+    # Distance from origin D = -d / |normal| (but normal is already normalized)
+    # dist: [B, 1]
+    d_vals = d.view(-1, 1)
+    dist_from_origin = -d_vals / norm_mags
+    
+    # Translation vector: normal * dist
+    # [B, 3] -> [B, 1, 3] for broadcasting
+    translation = (normals * dist_from_origin).unsqueeze(1)
+    
+    final_points = rotated_points + translation
+    
+    return final_points
+
 def get_plane_surface_points(a, b, c, d, width=0.4, resolution=0.005, device='cuda'):
     """
     Generates a dense point cloud representing a plane defined by ax + by + cz + d = 0.
