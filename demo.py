@@ -15,7 +15,7 @@ from lygra.utils.geom_utils import MeshObject
 from lygra.utils.robot_visualizer import RobotVisualizer
 from lygra.utils.transform_utils import batch_object_transform
 from lygra.utils.isaac_utils import generate_geodesic_confidence_mask, load_obj_rot_from_isaac, save_grasps_to_json_isaac_converted
-#from lygra.utils.save_utils import print_dict_structure
+from lygra.utils.save_utils import print_dict_structure, save_results_to_json
 
 
 # Lygra Pipeline
@@ -51,15 +51,14 @@ def get_args():
     parser.add_argument('--n_sample_point', type=int, default=2048, help='Number of sampled object points')
     parser.add_argument('--ik_finetune_iter', type=int, default=5, help='Number of IK finetune iterations')
     parser.add_argument('--zo_lr_sigma', type=float, default=5, help='Sigma of the Zeroth-order Optimizer')
-
     parser.add_argument('--cf_accel', type=str, default='lbvhs2', help='Contact Field Acceleration Structure')
     parser.add_argument('--object_pose_sampling_strategy', type=str, default='canonical', help='Object pose sampling strategy')
     parser.add_argument('--visualize', action='store_true', help='Enable visualization')
     parser.add_argument('--object_mesh_path', type=str, default="./assets/object/testing.obj", help='Path to the object mesh')
-    parser.add_argument('--object_mask_path', type=str, default=None, 
-                        help='Path to the object mesh mask of graspable area' )
-    parser.add_argument('--object_pose_json_path', type=str, default=None, 
-                        help='Path to the object mesh mask of graspable area' )
+    parser.add_argument('--object_mask_path', type=str, default=None, help='Path to the object mesh mask of graspable area' )
+    parser.add_argument('--object_pose_json_path', type=str, default=None, help='Path to the object mesh mask of graspable area' )
+    parser.add_argument('--save_results_lygra', type=str, default=None, help='Path to save the results for reloading and checking results' )
+    parser.add_argument('--save_results_isaac', type=str, default=None, help='Path to save the results for isaac sim' )
 
     args = parser.parse_args()
     return args
@@ -82,6 +81,8 @@ def main(args):
     object_mesh_path = args.object_mesh_path
     object_mask_path = args.object_mask_path
     object_pose_json_path = args.object_pose_json_path
+    save_results_lygra = args.save_results_lygra
+    save_results_isaac = args.save_results_isaac
     zo_lr_sigma = args.zo_lr_sigma
 
     n_contact = set()
@@ -152,7 +153,10 @@ def main(args):
 
     # Object Data. #If no mask provided then submesh defaults to original mesh
     object = MeshObject(object_mesh_path, object_mask_path)
-    rot_matrix = load_obj_rot_from_isaac(object_pose_json_path) #"assets/testing_tool_4.json")
+    if object_pose_json_path:
+        rot_matrix = load_obj_rot_from_isaac(object_pose_json_path)
+    else:
+        rot_matrix = np.array([0.0, 0.0, 0.0])
     object_area = object.get_area()
     zo_lr = ((object_area / n_sample_point) ** 0.5) * zo_lr_sigma
 
@@ -311,8 +315,10 @@ def main(args):
 
     n_result = len(result['q'])
     print("Number of Solutions:", n_result)
-    save_grasps_to_json_isaac_converted(result, object_pose_json_path, "assets/testing_hand_pose.json")
-    # print_dict_structure(result)
+    if save_results_lygra:
+        save_results_to_json(result, save_results_lygra)
+    if object_pose_json_path and save_results_isaac:
+        save_grasps_to_json_isaac_converted(result, object_pose_json_path, save_results_isaac)
    
     # -----------------
     # Visualize Results

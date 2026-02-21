@@ -22,7 +22,7 @@ class RobotVisualizer:
         self.robot_mesh = RobotMesh(robot.urdf_path,  mesh_scale=robot.get_mesh_scale())
         return 
 
-    def get_mesh_fk(self, q, mode='o3d', visual=True):
+    def get_mesh_fk(self, q, mode='o3d', visual=True, extra_meshes=None):
         """ Get robot mesh (trimesh format) under configuration q.
         
         Args:
@@ -38,7 +38,10 @@ class RobotVisualizer:
         q = q.view(1, -1)
         link_poses = batch_fk(self.robot_tree, q)["link"].detach().cpu().numpy()[0]
         link_poses = {self.robot_tree.links[i]: p for i, p in enumerate(link_poses)}
-        meshes = self.robot_mesh.get_all_link_meshes(link_poses, visual=visual)
+        meshes = self.robot_mesh.get_all_link_meshes(link_poses, visual=True)
+        if extra_meshes:
+            print("added extra meshes")
+            meshes.extend(extra_meshes)
         
         if mode == 'o3d':
             o3d_meshes = []

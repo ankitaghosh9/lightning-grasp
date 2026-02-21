@@ -8,37 +8,29 @@ from scipy.sparse.csgraph import dijkstra
 
 def lightning_to_isaac_transform(matrix):
     """
-    Converts a matrix from Lightning Grasp (Y-up) to Isaac Sim (Z-up).
-    Accepts either a 4x4 Transformation Matrix or a 3x3 Rotation Matrix.
-    
-    Args:
-        matrix (np.ndarray): Shape (4,4) or (3,3).
-        
-    Returns:
-        np.ndarray: Converted matrix of the same shape.
+    Converts a matrix (or batch of matrices) from Lightning Grasp (Y-up) to Isaac Sim (Z-up).
+    Accepts shape (3, 3), (4, 4), (N, 3, 3), or (N, 4, 4).
     """
-    matrix = np.array(matrix) # Ensure input is numpy array
+    matrix = np.array(matrix)
     
-    # Rotation: +90 degrees around X-axis
-    # (Y-up becomes Z-up)
+    # Rotation: +90 degrees around X-axis (Y-up becomes Z-up)
     R_L_to_I = np.array([
         [1,  0,  0],
         [0,  0, -1],
         [0,  1,  0]
     ])
     
-    if matrix.shape == (3, 3):
-        # Case 1: 3x3 Rotation Matrix
+    # Check the shape of the LAST two dimensions using matrix.shape[-2:]
+    if matrix.shape[-2:] == (3, 3):
         return R_L_to_I @ matrix
         
-    elif matrix.shape == (4, 4):
-        # Case 2: 4x4 Transformation Matrix
+    elif matrix.shape[-2:] == (4, 4):
         T_L_to_I = np.eye(4)
         T_L_to_I[:3, :3] = R_L_to_I
         return T_L_to_I @ matrix
         
     else:
-        raise ValueError(f"Input must be 3x3 or 4x4 matrix. Got shape {matrix.shape}")
+        raise ValueError(f"Inner dimensions must be 3x3 or 4x4. Got shape {matrix.shape}")
 
 
 def isaac_to_lightning_transform(matrix):
@@ -212,35 +204,74 @@ def generate_geodesic_confidence_mask(mesh, contact_pos_world, object_pose, cont
 
     return torch.from_numpy(confidence_values).float().to(device), colored_mesh
 
-def save_grasps_to_json_isaac_converted(results, json_file, output_file):
+def save_grasps_to_json_isaac_converted(results, json_file, output_file, 
+                                        hand_rot=np.array([[1,  0,  0], 
+                                                           [0,  0, -1], 
+                                                           [0,  1,  0]])):
     """
     Saves grasp results to JSON, converting from Lightning (Y-up) 
     to Isaac Sim (Z-up) coordinate systems.
     """
+
     num_poses = results['q'].shape[0]
-    output_data = []
-
-    for i in range(num_poses):
-        entry = {"id": i}
-
-        # 1. q, q_mask (No spatial conversion needed)
-        entry['q'] = results['q'][i].cpu().tolist()
-        entry['q_mask'] = results['q_mask'][i].cpu().numpy().astype(int).tolist()
-
-        # 2. Hand Global Pose
-        # Apply transformations to create global pose for the robot hand
-        hand_pose = np.eye(4)
-        # Relative Translation Shifting in Lightning Grasp
-        hand_pose[:3, 3] = -1 * results['object_pose'][i].cpu().numpy()[:3, 3]
-        # Apply transformation: T_new = T_convert @ T_old
-        hand_pose = lightning_to_isaac_transform(hand_pose)
-         # Relative Rotation and Translation Shifting in Isaac Sim
-        hand_pose[:3, :3] = np.eye(3)
-        hand_pose[:3, 3] = hand_pose[:3, 3] + load_obj_T_from_json(json_file)
-        entry['hand_pose'] = hand_pose.tolist()
-
-        output_data.append(entry)
+    
+    q = results['q'].cpu()
+    q_mask = results['q_mask'].cpu().numpy().astype(int)
+    
+    # Hand Pose
+    forearm_to_wrist = np.array([0, -0.010, 0.213])
+    wrist_to_palm = np.array([0, 0, 0.034])
+    hand_poses = np.tile(np.eye(4), (num_poses, 1, 1))
+    hand_poses[:, :3, 3] = -1 * (forearm_to_wrist + wrist_to_palm)
+    
+    obj_translations = results['object_pose'][:, :3, 3].cpu().numpy()
+    hand_poses[:, :3, 3] = hand_poses[:, :3, 3] - obj_translations
+    hand_poses = lightning_to_isaac_transform(hand_poses)
+    # hand_poses[:, :3, :3] = hand_rot
+    # json_translation = np.array(load_obj_T_from_json(json_file)) # Ensure it's a numpy array of shape (3,)
+    # hand_poses[:, :3, 3] += json_translation
+    
+    output_data = {
+        'q': q.tolist(),            # Shape: (num_poses, ...)
+        'q_mask': q_mask.tolist(),  # Shape: (num_poses, ...)
+        'hand_pose': hand_poses.tolist()    # Shape: (num_poses, 4, 4)
+    }
 
     with open(output_file, 'w') as f:
         json.dump(output_data, f, indent=4)
         print(f"Saved {len(output_data)} Isaac-converted poses to {output_file}")
+
+# def save_grasps_to_json_isaac_converted(results, json_file, output_file, 
+#                                         hand_rot=np.array([[1,  0,  0], 
+#                                                            [0,  0, -1], 
+#                                                            [0,  1,  0]])):
+#     """
+#     Saves grasp results to JSON, converting from Lightning (Y-up) 
+#     to Isaac Sim (Z-up) coordinate systems.
+#     """
+#     num_poses = results['q'].shape[0]
+#     output_data = []
+
+#     for i in range(num_poses):
+#         entry = {"id": i}
+
+#         # 1. q, q_mask (No spatial conversion needed)
+#         entry['q'] = results['q'][i].cpu().tolist()
+#         entry['q_mask'] = results['q_mask'][i].cpu().numpy().astype(int).tolist()
+#         # 2. Hand Global Pose
+#         # Apply transformations to create global pose for the robot hand
+#         hand_pose = np.eye(4)
+#         # Relative Translation Shifting in Lightning Grasp
+#         hand_pose[:3, 3] = -1 * results['object_pose'][i].cpu().numpy()[:3, 3]
+#         # Apply transformation: T_new = T_convert @ T_old
+#         hand_pose = lightning_to_isaac_transform(hand_pose)
+#          # Relative Rotation and Translation Shifting in Isaac Sim
+#         hand_pose[:3, :3] = hand_rot
+#         hand_pose[:3, 3] = hand_pose[:3, 3] + load_obj_T_from_json(json_file)
+#         entry['hand_pose'] = hand_pose.tolist()
+
+#         output_data.append(entry)
+
+#     with open(output_file, 'w') as f:
+#         json.dump(output_data, f, indent=4)
+#         print(f"Saved {len(output_data)} Isaac-converted poses to {output_file}")

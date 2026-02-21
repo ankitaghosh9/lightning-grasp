@@ -8,7 +8,7 @@ from lygra.robot.allegro import Allegro
 from lygra.robot.shadow import Shadow
 from lygra.robot.leap import Leap
 from lygra.robot.dclaw import DClaw
-
+from lygra.robot.shadow_dex import ShadowDex
 
 def build_robot(name, urdf_path=None):
     if name == 'allegro':
@@ -23,5 +23,8 @@ def build_robot(name, urdf_path=None):
     elif name == 'dclaw':
         return DClaw(urdf_path=urdf_path)
     
+    elif name == 'shadow_dex':
+        return ShadowDex(urdf_path=urdf_path)
+        
     else:
         assert False, f"Robot {name} undefined."
