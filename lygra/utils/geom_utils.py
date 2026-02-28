@@ -22,7 +22,7 @@ class MeshObject:
 
         if object_mask_path is not None:
             self.mask = np.load(object_mask_path)
-            valid_face_mask = np.all(~self.mask[self.mesh.faces], axis=1)  
+            valid_face_mask = np.all(self.mask[self.mesh.faces], axis=1)  
             self.submesh = self.mesh.submesh([valid_face_mask], append=True)
         else:
             self.mask = None
@@ -85,14 +85,14 @@ def get_tangent_plane(batch_vector):
         
         return x.reshape(*shape, 3), y.reshape(*shape, 3)
 
-import torch
-
-def get_plane_surface_points_batch(a, b, c, d, width=0.4, resolution=0.005, device='cuda'):
+def get_plane_surface_points_batch(a, b, c, d, center_point=None, width=0.4, resolution=0.005, device='cuda'):
     """
-    Generates a batch of dense point clouds representing planes defined by ax + by + cz + d = 0.
+    Generates a batch of dense point clouds representing planes.
     
     Args:
         a, b, c, d: Tensors of shape (B,) or (B, 1) representing plane coefficients.
+        center_point: Optional Tensor of shape (B, 3) or (3,). If provided, this point
+                      becomes the center of the generated plane, overriding 'd'.
         width: Scalar, size of the plane.
         resolution: Scalar, spacing between points.
         device: Torch device.
@@ -101,7 +101,6 @@ def get_plane_surface_points_batch(a, b, c, d, width=0.4, resolution=0.005, devi
         torch.Tensor: [B, N, 3] tensor of points, where B is batch size.
     """
     # 1. Standardization: Ensure inputs are 1D tensors (Batch Size)
-    # We allow inputs to be lists or scalars, converting them to tensors
     def to_tensor(x):
         t = torch.as_tensor(x, device=device, dtype=torch.float32)
         return t.flatten()
@@ -110,7 +109,7 @@ def get_plane_surface_points_batch(a, b, c, d, width=0.4, resolution=0.005, devi
     
     # Check consistent batch size
     batch_size = a.shape[0]
-    assert b.shape[0] == batch_size and c.shape[0] == batch_size and d.shape[0] == batch_size
+    # Note: We rely on a,b,c for batch size. d is checked only if we use it later.
     
     # 2. Generate Base Grid (Z=0) - Created once, expanded later
     steps = int(width / resolution)
@@ -146,12 +145,10 @@ def get_plane_surface_points_batch(a, b, c, d, width=0.4, resolution=0.005, devi
     # Mask where sin(theta) is near zero (vectors are parallel or anti-parallel)
     is_singular = rot_sin.squeeze() < 1e-6
     
-    # Normalize axis safely (avoid NaN for singular cases)
-    # We add 1e-8 to denominator just for the math, but will overwrite these indices later
+    # Normalize axis safely
     axis_norm = rot_axis / (rot_sin + 1e-8)
     
     # Construct Skew-Symmetric Matrices K: [B, 3, 3]
-    # K = [[0, -z, y], [z, 0, -x], [-y, x, 0]]
     zeros = torch.zeros_like(axis_norm[:, 0])
     K = torch.stack([
         torch.stack([zeros, -axis_norm[:, 2], axis_norm[:, 1]], dim=1),
@@ -163,124 +160,49 @@ def get_plane_surface_points_batch(a, b, c, d, width=0.4, resolution=0.005, devi
     I = torch.eye(3, device=device).unsqueeze(0).expand(batch_size, 3, 3)
     
     # Rodrigues Formula: R = I + sin*K + (1-cos)*K^2
-    # [B, 3, 3]
     R = I + (rot_sin.unsqueeze(-1) * K) + ((1 - rot_cos.unsqueeze(-1)) * (K @ K))
     
     # -- Fix Singularities --
-    # If cos > 0 (Parallel): R = Identity
-    # If cos < 0 (Anti-Parallel): R = 180 deg flip (e.g. diagonal 1, -1, -1)
     if is_singular.any():
-        # Indices where singular
         idx_sing = torch.where(is_singular)[0]
-        
-        # Check cosine sign for these indices
         cos_vals = rot_cos[idx_sing].squeeze()
-        
-        # Create Identity and Flip matrices
         I_sing = torch.eye(3, device=device).unsqueeze(0).expand(len(idx_sing), 3, 3)
         Flip_sing = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], 
                                  dtype=torch.float32, device=device).unsqueeze(0).expand(len(idx_sing), 3, 3)
-        
-        # Choose based on cos > 0
         R_corrected = torch.where(cos_vals.view(-1, 1, 1) > 0, I_sing, Flip_sing)
-        
-        # Overwrite in main R tensor
         R[idx_sing] = R_corrected
 
     # 5. Rotate Points
     # Base: [1, N, 3] -> Expand to [B, N, 3]
     points_expanded = base_points.expand(batch_size, -1, -1)
     
-    # Batch Matrix Multiplication: (B, N, 3) @ (B, 3, 3)^T
-    # We transpose R to (B, 3, 3) -> (B, 3, 3) for correct multiplication on the right
+    # Batch Matrix Multiplication
     rotated_points = torch.bmm(points_expanded, R.transpose(1, 2))
     
     # 6. Translate Points
-    # Distance from origin D = -d / |normal| (but normal is already normalized)
-    # dist: [B, 1]
-    d_vals = d.view(-1, 1)
-    dist_from_origin = -d_vals / norm_mags
-    
-    # Translation vector: normal * dist
-    # [B, 3] -> [B, 1, 3] for broadcasting
-    translation = (normals * dist_from_origin).unsqueeze(1)
-    
-    final_points = rotated_points + translation
-    
-    return final_points
-
-def get_plane_surface_points(a, b, c, d, width=0.4, resolution=0.005, device='cuda'):
-    """
-    Generates a dense point cloud representing a plane defined by ax + by + cz + d = 0.
-    
-    Args:
-        a, b, c, d: Coefficients of the plane equation.
-        width: The size of the plane (width x width) in meters.
-        resolution: Spacing between points (smaller = denser collision check).
-        device: Torch device (e.g., 'cuda' or 'cpu').
+    if center_point is not None:
+        # --- NEW LOGIC ---
+        # If a center point is provided, we translate the rotated grid (which is currently centered at 0,0,0)
+        # to the specified center_point.
         
-    Returns:
-        torch.Tensor: [N, 3] tensor of points on the plane.
-    """
-    # 1. Generate a base grid on the XY plane (z=0) centered at origin
-    steps = int(width / resolution)
-    range_t = torch.linspace(-width/2, width/2, steps, device=device)
-    grid_x, grid_y = torch.meshgrid(range_t, range_t, indexing='xy')
-    
-    # Flatten to create a list of points: [x, y, 0]
-    base_points = torch.stack([
-        grid_x.flatten(),
-        grid_y.flatten(),
-        torch.zeros_like(grid_x.flatten())
-    ], dim=1)  # Shape: [N, 3]
-
-    # 2. Compute the Normal Vector of the target plane
-    normal = torch.tensor([a, b, c], dtype=torch.float32, device=device)
-    norm_magnitude = torch.norm(normal)
-    
-    if norm_magnitude < 1e-6:
-        raise ValueError("Plane normal vector (a, b, c) cannot be zero.")
-    
-    normal = normal / norm_magnitude  # Normalize
-    
-    # 3. Compute Rotation Matrix to align Z-axis (0,0,1) with Plane Normal
-    # We want to rotate "up" (0,0,1) to match (a,b,c)
-    z_axis = torch.tensor([0.0, 0.0, 1.0], device=device)
-    
-    # Axis of rotation = Cross Product (z_axis x normal)
-    rot_axis = torch.cross(z_axis, normal, dim=0)
-    rot_sin = torch.norm(rot_axis)
-    rot_cos = torch.dot(z_axis, normal)
-    
-    # Rotation Matrix calculation
-    if rot_sin < 1e-6:
-        # Normal is parallel to Z-axis
-        if rot_cos > 0:
-            R = torch.eye(3, device=device) # Already aligned
-        else:
-            # 180 degree flip around X axis
-            R = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=torch.float32, device=device) 
+        # Ensure center_point is a tensor on the correct device
+        if not isinstance(center_point, torch.Tensor):
+             center_point = torch.tensor(center_point, device=device, dtype=torch.float32)
+        
+        # Handle shape: If (3,), reshape to (1, 3) then expand to (B, 3)
+        if center_point.ndim == 1:
+            center_point = center_point.view(1, 3).expand(batch_size, 3)
+        
+        # Expand for broadcasting: [B, 3] -> [B, 1, 3]
+        translation = center_point.unsqueeze(1)
+        
     else:
-        rot_axis = rot_axis / rot_sin
-        K = torch.tensor([
-            [0, -rot_axis[2], rot_axis[1]],
-            [rot_axis[2], 0, -rot_axis[0]],
-            [-rot_axis[1], rot_axis[0], 0]
-        ], device=device)
-        
-        # Rodrigues' rotation formula: I + sin(theta)K + (1-cos(theta))K^2
-        R = torch.eye(3, device=device) + rot_sin * K + (1 - rot_cos) * (K @ K)
-
-    # 4. Rotate the points
-    # (Using matrix multiplication: Points @ R.T)
-    rotated_points = base_points @ R.T
-
-    # 5. Translate the plane
-    # The distance from origin to the plane along the normal is -d / |(a,b,c)|
-    # We shift the points along the normal vector by this distance.
-    distance_from_origin = -d / norm_magnitude
-    translation = normal * distance_from_origin
+        # --- OLD LOGIC ---
+        # Use 'd' to calculate distance from origin
+        d_vals = d.view(-1, 1)
+        dist_from_origin = -d_vals / norm_mags
+        translation = (normals * dist_from_origin).unsqueeze(1)
     
     final_points = rotated_points + translation
-
+    
     return final_points

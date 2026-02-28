@@ -14,7 +14,7 @@ from lygra.memory import IKGPUBufferPool
 from lygra.utils.geom_utils import MeshObject
 from lygra.utils.robot_visualizer import RobotVisualizer
 from lygra.utils.transform_utils import batch_object_transform
-from lygra.utils.isaac_utils import generate_geodesic_confidence_mask, load_obj_rot_from_isaac, save_grasps_to_json_isaac_converted
+from lygra.utils.isaac_utils import generate_geodesic_confidence_mask, load_obj_rot_from_isaac, load_obj_T_from_json, save_grasps_to_json_isaac_converted
 from lygra.utils.save_utils import print_dict_structure, save_results_to_json
 
 
@@ -25,7 +25,7 @@ from lygra.pipeline.module.contact_collection import sample_pose_and_contact_fro
 from lygra.pipeline.module.contact_optimization import search_contact_point
 from lygra.pipeline.module.kinematics import batch_ik, batch_contact_adjustment
 from lygra.pipeline.module.collision import batch_filter_collision
-from lygra.pipeline.module.postprocess import batch_assign_free_finger_and_filter, batch_generate_bg_surface
+from lygra.pipeline.module.postprocess import batch_assign_free_finger_and_filter, batch_generate_bg_surface, generate_translated_clouds
 
 # Common 
 import torch 
@@ -41,11 +41,11 @@ from scipy.spatial.transform import Rotation as R
 
 def get_args():
     parser = argparse.ArgumentParser(description="Script configuration")
-    parser.add_argument('--robot', type=str, default="allegro", help='Robot Name')
-    parser.add_argument('--batch_size_outer', type=int, default=64, help='Outer batch size (Object Pose)')
+    parser.add_argument('--robot', type=str, default="shadow_dex", help='Robot Name')
+    parser.add_argument('--batch_size_outer', type=int, default=128, help='Outer batch size (Object Pose)')
     parser.add_argument('--batch_size_inner', type=int, default=64, help='Inner batch size (Contact Domain Variants)')
     parser.add_argument('--n_contact_links', nargs='*', default=['ffdistal', 'ffmiddle', 'thdistal'], 
-                        choices = ['rfdistal', 'lfdistal', 'ffmiddle', 'lfmiddle', 'ffdistal', 'rfmiddle', 'thdistal', 'mfmiddle', 'mfdistal'], 
+                        #choices = ['rfdistal', 'lfdistal', 'ffmiddle', 'lfmiddle', 'ffdistal', 'rfmiddle', 'thdistal', 'mfmiddle', 'mfdistal'], 
                         help='Name of the links to be involved in the grasp')
     #parser.add_argument('--n_contact', type=int, default=3, help='Number of non-static contacts to optimize')
     parser.add_argument('--n_sample_point', type=int, default=2048, help='Number of sampled object points')
@@ -57,6 +57,7 @@ def get_args():
     parser.add_argument('--object_mesh_path', type=str, default="./assets/object/testing.obj", help='Path to the object mesh')
     parser.add_argument('--object_mask_path', type=str, default=None, help='Path to the object mesh mask of graspable area' )
     parser.add_argument('--object_pose_json_path', type=str, default=None, help='Path to the object mesh mask of graspable area' )
+    parser.add_argument('--scene_pcd_path', type=str, default=None, help='Path to ply file of entire scene' )
     parser.add_argument('--save_results_lygra', type=str, default=None, help='Path to save the results for reloading and checking results' )
     parser.add_argument('--save_results_isaac', type=str, default=None, help='Path to save the results for isaac sim' )
 
@@ -81,6 +82,7 @@ def main(args):
     object_mesh_path = args.object_mesh_path
     object_mask_path = args.object_mask_path
     object_pose_json_path = args.object_pose_json_path
+    scene_pcd_path = args.scene_pcd_path
     save_results_lygra = args.save_results_lygra
     save_results_isaac = args.save_results_isaac
     zo_lr_sigma = args.zo_lr_sigma
@@ -153,6 +155,7 @@ def main(args):
 
     # Object Data. #If no mask provided then submesh defaults to original mesh
     object = MeshObject(object_mesh_path, object_mask_path)
+
     if object_pose_json_path:
         rot_matrix = load_obj_rot_from_isaac(object_pose_json_path)
     else:
@@ -301,9 +304,12 @@ def main(args):
         # Hand-to-hand  -- AABB broad phase + GJK narrow phase 
         # Hand-to-point -- AABB broad phase + halfplane-test narrow phase
 
-        # # # Surface Plane Points
+        # # # # Surface Plane and Scene Points
         surface_points = batch_generate_bg_surface(result=result, object_point=points_all)
-        result["surface_points"] = surface_points
+        scene_points = generate_translated_clouds(scene_pcd_path, result["object_pose"].cpu().numpy())
+        scene_points_num = scene_points.shape[1]
+        scene_points = torch.from_numpy(scene_points).float().to("cuda:0")
+        result["surface_points"] = torch.cat((scene_points, surface_points), dim=1)
 
         result = batch_assign_free_finger_and_filter(
             tree=tree,
@@ -401,6 +407,7 @@ def main(args):
         # 6. Create Table/Surface (Static)
         if result['surface_points'] is not None:
             surface_points = result['surface_points'][idx].cpu().numpy()
+            surface_points = surface_points[2000:scene_points_num]
             surface_pcd = o3d.geometry.PointCloud()
             surface_pcd.points = o3d.utility.Vector3dVector(surface_points)
             surface_pcd.paint_uniform_color([0.3, 0.3, 0.3])

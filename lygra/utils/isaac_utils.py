@@ -36,13 +36,7 @@ def lightning_to_isaac_transform(matrix):
 def isaac_to_lightning_transform(matrix):
     """
     Converts a matrix from Isaac Sim (Z-up) to Lightning Grasp (Y-up).
-    Accepts either a 4x4 Transformation Matrix or a 3x3 Rotation Matrix.
-    
-    Args:
-        matrix (np.ndarray): Shape (4,4) or (3,3).
-        
-    Returns:
-        np.ndarray: Converted matrix of the same shape.
+    Accepts shape (3, 3), (4, 4), (N, 3, 3), or (N, 4, 4).
     """
     matrix = np.array(matrix) # Ensure input is numpy array
     
@@ -54,11 +48,11 @@ def isaac_to_lightning_transform(matrix):
         [0, -1,  0]
     ])
     
-    if matrix.shape == (3, 3):
+    if matrix.shape[-2:] == (3, 3):
         # Case 1: 3x3 Rotation Matrix
         return R_I_to_L @ matrix
         
-    elif matrix.shape == (4, 4):
+    elif matrix.shape[-2:] == (4, 4):
         # Case 2: 4x4 Transformation Matrix
         T_I_to_L = np.eye(4)
         T_I_to_L[:3, :3] = R_I_to_L
@@ -76,13 +70,9 @@ def load_obj_rot_from_isaac(file_path):
     with open(file_path, 'r') as f:
         data = json.load(f)
     
-    # Extract quaternion components [w, x, y, z]
-    q_data = data["R"]
-    quat = [q_data["x"], q_data["y"], q_data["z"], q_data["w"]] # SciPy uses [x, y, z, w]
-    
-    # 2. Convert to 3x3 Rotation Matrix
-    # We create a Rotation object from the quaternion
-    rotation_obj = R.from_quat(quat)
+    # Extract rot component
+    euler_angles = data["rotation_euler"]
+    rotation_obj = R.from_euler('xyz', euler_angles, degrees=True)
     matrix_3x3 = rotation_obj.as_matrix()
     
     # 3. Transform to lightning grasp orientation
@@ -104,9 +94,7 @@ def load_obj_T_from_json(file_path):
         data = json.load(f)
     
     # Extract translation dictionary
-    t_data = data["T"]
-    # Create numpy array in order [x, y, z]
-    translation_array = np.array([[t_data["x"], t_data["y"], t_data["z"]]])
+    translation_array = np.array(data["translation"])
     
     return translation_array
 

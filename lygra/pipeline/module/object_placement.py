@@ -194,7 +194,7 @@ def get_bounded_object_pose(n, object_data, tree, mesh_data,
                             rot_vec=None, 
                             bounds={'x': [-0.03, 0.07], 
                                     'y': [-0.13, -0.03], 
-                                    'z': [0.05, 0.15]}):
+                                    'z': [0.05, 0.25]}):
     """
     Generates 'n' valid object poses by sampling random translations within bounds 
     and performing collision checks.
